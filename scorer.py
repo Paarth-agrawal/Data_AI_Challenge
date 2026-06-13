@@ -17,18 +17,16 @@ def score_candidate(candidate, job):
     # 2. EXPERIENCE (30 points max)
     years = candidate["profile"].get("years_of_experience", 0)
     if years >= job["min_experience_years"]:
-        exp_score = min(30, years * 3)
+        exp_score = min(30, years * 2)
         score += exp_score
-        reasons.append(f"{years} years of experience")
+    reasons.append(f"{years} years of experience")
 
     # 3. JOB TITLE MATCH (20 points max)
     current_title = candidate["profile"].get("current_title", "").lower()
-    title_matched = False
     for preferred in job["preferred_titles"]:
         if preferred.lower() in current_title:
             score += 20
             reasons.append(f"Relevant title: {current_title}")
-            title_matched = True
             break
     
     # Penalty for wrong job functions
@@ -40,8 +38,9 @@ def score_candidate(candidate, job):
     # 4. BEHAVIORAL SIGNALS (10 points max)
     signals = candidate.get("redrob_signals", {})
     response_rate = signals.get("recruiter_response_rate", 0)
-    if response_rate > 0.5:
-        score += 10
-        reasons.append(f"High response rate: {response_rate}")
+    signal_score = round(response_rate * 10, 2)
+    score += signal_score
+    reasons.append(f"Response rate: {response_rate}")
 
+    # Return final score and reasoning
     return round(score, 2), " | ".join(reasons)
