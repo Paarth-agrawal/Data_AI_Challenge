@@ -1,50 +1,36 @@
-def score_candidate(candidate, job):
-    score = 0
-    reasons = []
+import json
+from job_description import JOB
+from scorer import score_candidate
 
-    # 1. SKILL MATCH (40 points max)
-    candidate_skills = [s["name"].lower() for s in candidate.get("skills", [])]
-    matched_skills = []
-    for required in job["required_skills"]:
-        if required.lower() in candidate_skills:
-            matched_skills.append(required)
+# Load candidates
+print("Loading candidates...")
+with open("sample_candidates.json") as f:
+    candidates = json.load(f)
 
-    skill_score = (len(matched_skills) / len(job["required_skills"])) * 40
-    score += skill_score
-    if matched_skills:
-        reasons.append(f"Skills matched: {', '.join(matched_skills)}")
-    else:
-        reasons.append("No required skills matched")
+print(f"Total candidates loaded: {len(candidates)}")
 
-    # 2. EXPERIENCE (30 points max)
-    years = candidate["profile"].get("years_of_experience", 0)
-    if years >= job["min_experience_years"]:
-        exp_score = min(30, years * 2)
-        score += exp_score
-    reasons.append(f"{years} yrs experience")
+# Score every candidate
+print("Scoring candidates...")
+results = []
+for candidate in candidates:
+    score, reasoning = score_candidate(candidate, JOB)
+    results.append({
+        "candidate_id": candidate["candidate_id"],
+        "name": candidate["profile"]["anonymized_name"],
+        "title": candidate["profile"]["current_title"],
+        "score": score,
+        "reasoning": reasoning
+    })
 
-    # 3. JOB TITLE (20 points max)
-    current_title = candidate["profile"].get("current_title", "").lower()
-    title_matched = False
-    for preferred in job["preferred_titles"]:
-        if preferred.lower() in current_title:
-            score += 20
-            reasons.append(f"Good title: {current_title}")
-            title_matched = True
-            break
+# Sort by score (highest first)
+results.sort(key=lambda x: x["score"], reverse=True)
 
-    if not title_matched:
-        for bad_title in job["avoid_titles"]:
-            if bad_title.lower() in current_title:
-                score -= 15
-                reasons.append(f"Wrong title: {current_title}")
-                break
+# Print top 10
+print("\n========== TOP CANDIDATES ==========\n")
+for i, r in enumerate(results[:10], 1):
+    print(f"#{i} {r['name']} — {r['title']}")
+    print(f"    Score: {r['score']}")
+    print(f"    Why: {r['reasoning']}")
+    print()
 
-    # 4. BEHAVIORAL SIGNALS (10 points max)
-    signals = candidate.get("redrob_signals", {})
-    response_rate = signals.get("recruiter_response_rate", 0)
-    signal_score = round(response_rate * 10, 2)
-    score += signal_score
-    reasons.append(f"Response rate: {response_rate}")
-
-    return round(score, 2), " | ".join(reasons)
+print("===== DONE =====")
