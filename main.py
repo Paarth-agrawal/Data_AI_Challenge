@@ -2,14 +2,13 @@ import json
 from job_description import JOB
 from scorer import score_candidate
 
-# Load candidates
+# ── LOAD CANDIDATES ───────────────────────────────────────────────────
 print("Loading candidates...")
 with open("sample_candidates.json") as f:
     candidates = json.load(f)
+print(f"Loaded {len(candidates)} candidates")
 
-print(f"Total candidates loaded: {len(candidates)}")
-
-# Score every candidate
+# ── SCORE EVERY CANDIDATE ─────────────────────────────────────────────
 print("Scoring candidates...")
 results = []
 for candidate in candidates:
@@ -18,18 +17,28 @@ for candidate in candidates:
         "candidate_id": candidate["candidate_id"],
         "name": candidate["profile"]["anonymized_name"],
         "title": candidate["profile"]["current_title"],
+        "years": candidate["profile"]["years_of_experience"],
         "score": score,
         "reasoning": reasoning
     })
 
-# Sort by score (highest first)
+# ── SORT BY SCORE ─────────────────────────────────────────────────────
 results.sort(key=lambda x: x["score"], reverse=True)
 
-# Print top 10
-print("\n========== TOP CANDIDATES ==========\n")
+# ── PRINT TOP 10 ──────────────────────────────────────────────────────
+print("\n========== TOP 10 CANDIDATES ==========\n")
 for i, r in enumerate(results[:10], 1):
-    print(f"#{i} {r['name']} — {r['title']}")
-    print(f"    Score: {r['score']}")
+    print(f"#{i} {r['name']}")
+    print(f"    Title : {r['title']}")
+    print(f"    Years : {r['years']}")
+    print(f"    Score : {r['score']}")
+    print(f"    Why   : {r['reasoning']}")
+    print()
+
+# ── PRINT BOTTOM 3 (sanity check) ────────────────────────────────────
+print("========== BOTTOM 3 (should be weak candidates) ==========\n")
+for i, r in enumerate(results[-3:], 1):
+    print(f"#{i} {r['name']} — {r['title']} — Score: {r['score']}")
     print(f"    Why: {r['reasoning']}")
     print()
 
