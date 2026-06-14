@@ -24,6 +24,9 @@ JOB = {
         "Customer Support", "Project Manager", "Business Analyst",
         "Civil Engineer", "Mechanical Engineer", "Operations Manager"
     ],
+    "junior_title_flags": [
+        "junior", "intern", "trainee", "fresher", "entry level"
+    ],
     "consulting_firms": [
         "tcs", "infosys", "wipro", "accenture",
         "cognizant", "capgemini"

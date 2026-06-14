@@ -33,19 +33,26 @@ def score_candidate(candidate, job):
     if years_experience < 2:
         return 0.0, f"Disqualified: too junior ({years_experience} yrs)"
 
+    # 4. Junior title — JD wants Senior level
+    for junior_flag in job.get("junior_title_flags", []):
+        if junior_flag in current_title:
+            return 0.0, f"Disqualified: junior level role ({current_title})"
+
     # ── 1. SKILL MATCH (50 points max) ───────────────────────────────
-    # This is the most important section — skills matter most for this role
     required_skills = [s.lower() for s in job.get("required_skills", [])]
     matched         = [s for s in required_skills if s in candidate_skills]
     skill_score     = (len(matched) / len(required_skills)) * 50
     score          += skill_score
 
-    if matched:
-        reasons.append(f"Skills: {', '.join(matched[:5])}")
-    else:
-        # Zero AI skills = heavy penalty, should never rank high
+    # Minimum skill threshold — at least 2 skills required
+    if len(matched) == 0:
         score -= 15
         reasons.append("No required skills matched")
+    elif len(matched) == 1:
+        score -= 8
+        reasons.append(f"Only 1 skill matched: {matched[0]}")
+    else:
+        reasons.append(f"Skills: {', '.join(matched[:5])}")
 
     # Bonus skills (5 points max)
     bonus_skills  = [s.lower() for s in job.get("bonus_skills", [])]
@@ -60,15 +67,21 @@ def score_candidate(candidate, job):
     max_exp = job.get("max_experience_years", 9)
 
     if min_exp <= years_experience <= max_exp:
-        exp_score = 15
+        exp_score = 15          # Sweet spot: 5-9 years
+    elif years_experience > 12:
+        exp_score = 5           # Too overqualified
+        reasons.append(f"Overqualified: {years_experience} yrs")
     elif years_experience > max_exp:
-        exp_score = 10
+        exp_score = 10          # Slightly over but ok
     elif years_experience >= min_exp - 1:
-        exp_score = 8
+        exp_score = 8           # Slightly under
     else:
         exp_score = 3
     score += exp_score
-    reasons.append(f"{years_experience} yrs experience")
+    if exp_score == 15:
+        reasons.append(f"{years_experience} yrs experience")
+    elif "Overqualified" not in " ".join(reasons):
+        reasons.append(f"{years_experience} yrs experience")
 
     # ── 3. JOB TITLE (15 points max) ─────────────────────────────────
     title_matched = False
