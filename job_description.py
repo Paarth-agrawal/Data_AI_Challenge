@@ -15,13 +15,14 @@ JOB = {
     "preferred_titles": [
         "AI Engineer", "ML Engineer", "Machine Learning Engineer",
         "Data Scientist", "NLP Engineer", "Research Engineer",
-        "Applied Scientist", "Recommendation Systems Engineer"
+        "Applied Scientist", "Recommendation Systems Engineer",
+        "Data Engineer", "Backend Engineer", "Software Engineer"
     ],
     "avoid_titles": [
-        "Marketing", "HR", "Sales", "Graphic Designer",
-        "Content Writer", "Accountant", "Java Developer",
-        "Frontend Engineer", "Customer Support", "Project Manager",
-        "Business Analyst", "QA Engineer", "DevOps"
+        "Marketing", "Sales", "HR Manager", "Human Resource",
+        "Graphic Designer", "Content Writer", "Accountant",
+        "Customer Support", "Project Manager", "Business Analyst",
+        "Civil Engineer", "Mechanical Engineer", "Operations Manager"
     ],
     "consulting_firms": [
         "tcs", "infosys", "wipro", "accenture",
