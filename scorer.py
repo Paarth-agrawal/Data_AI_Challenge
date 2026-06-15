@@ -1,7 +1,58 @@
 from datetime import datetime, timezone
 
+def detect_honeypot(candidate):
+    """
+    Only flag genuinely impossible profiles.
+    Be conservative — better to miss a honeypot than disqualify a real candidate.
+    """
+    profile = candidate.get("profile", {})
+    career  = candidate.get("career_history", [])
+    skills  = candidate.get("skills", [])
+
+    current_year  = datetime.now().year
+    years_exp     = profile.get("years_of_experience", 0)
+    grad_year     = profile.get("graduation_year", 0)
+
+    # Check 1: Graduation year in the future
+    if grad_year and grad_year > current_year:
+        return True, f"Honeypot: graduation year {grad_year} is in the future"
+
+    # Check 2: Experience impossible given graduation year
+    # e.g. graduated 2022 but claims 15 years experience
+    if grad_year and grad_year > 0:
+        max_possible = current_year - grad_year
+        if years_exp > max_possible + 2:
+            return True, f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
+
+    # Check 3: Worked at a company BEFORE it was founded
+    for job in career:
+        founded    = job.get("company_founded_year", 0)
+        start_year = job.get("start_year", 0)
+        if founded and start_year and start_year < founded - 1:
+            return True, "Honeypot: worked at company before it was founded"
+
+    # Check 4: Career history duration wildly exceeds claimed experience
+    # Only flag if career months are MORE than 3 years beyond claimed
+    if career:
+        total_months  = sum(j.get("duration_months", 0) for j in career)
+        claimed_months = years_exp * 12
+        if total_months > claimed_months + 36:
+            return True, f"Honeypot: career history ({total_months}mo) far exceeds claimed exp ({claimed_months}mo)"
+
+    # Check 5: Expert in 20+ skills — truly impossible
+    # (removed the 10+ check — 10 expert skills is realistic for senior engineers)
+    expert_skills = [
+        s for s in skills
+        if str(s.get("proficiency", "")).lower() in ["expert", "advanced"]
+    ]
+    if len(expert_skills) >= 20:
+        return True, "Honeypot: expert in 20+ skills simultaneously"
+
+    return False, ""
+
+
 def score_candidate(candidate, job):
-    score = 0
+    score   = 0
     reasons = []
 
     # ── SETUP ─────────────────────────────────────────────────────────
@@ -13,6 +64,11 @@ def score_candidate(candidate, job):
     years_experience = profile.get("years_of_experience", 0)
     consulting_firms = job.get("consulting_firms", [])
     candidate_skills = [s["name"].lower() for s in skills]
+
+    # ── HONEYPOT CHECK ────────────────────────────────────────────────
+    is_honeypot, honeypot_reason = detect_honeypot(candidate)
+    if is_honeypot:
+        return 0.0, f"Disqualified: {honeypot_reason}"
 
     # ── INSTANT DISQUALIFIERS ─────────────────────────────────────────
 
@@ -33,7 +89,7 @@ def score_candidate(candidate, job):
     if years_experience < 2:
         return 0.0, f"Disqualified: too junior ({years_experience} yrs)"
 
-    # 4. Junior title — JD wants Senior level
+    # 4. Junior title
     for junior_flag in job.get("junior_title_flags", []):
         if junior_flag in current_title:
             return 0.0, f"Disqualified: junior level role ({current_title})"
@@ -44,7 +100,6 @@ def score_candidate(candidate, job):
     skill_score     = (len(matched) / len(required_skills)) * 50
     score          += skill_score
 
-    # Minimum skill threshold — at least 2 skills required
     if len(matched) == 0:
         score -= 15
         reasons.append("No required skills matched")
@@ -67,14 +122,14 @@ def score_candidate(candidate, job):
     max_exp = job.get("max_experience_years", 9)
 
     if min_exp <= years_experience <= max_exp:
-        exp_score = 15          # Sweet spot: 5-9 years
+        exp_score = 15
     elif years_experience > 12:
-        exp_score = 5           # Too overqualified
+        exp_score = 5
         reasons.append(f"Overqualified: {years_experience} yrs")
     elif years_experience > max_exp:
-        exp_score = 10          # Slightly over but ok
+        exp_score = 10
     elif years_experience >= min_exp - 1:
-        exp_score = 8           # Slightly under
+        exp_score = 8
     else:
         exp_score = 3
     score += exp_score
@@ -114,15 +169,12 @@ def score_candidate(candidate, job):
         reasons.append("Some product history")
 
     # ── 5. BEHAVIORAL SIGNALS (15 points max) ────────────────────────
-
-    # Open to work
     if signals.get("open_to_work_flag", False):
         score += 4
         reasons.append("Open to work")
     else:
         score -= 3
 
-    # How recently active?
     last_active = signals.get("last_active_date", "")
     if last_active:
         try:
@@ -143,12 +195,10 @@ def score_candidate(candidate, job):
         except Exception:
             pass
 
-    # Response rate
     response_rate = signals.get("recruiter_response_rate", 0)
     score        += round(response_rate * 4, 1)
     reasons.append(f"Response rate: {int(response_rate * 100)}%")
 
-    # Notice period
     notice = signals.get("notice_period_days", 90)
     if notice <= 30:
         score += 3
@@ -156,7 +206,6 @@ def score_candidate(candidate, job):
     elif notice > 60:
         score -= 2
 
-    # GitHub activity
     github = signals.get("github_activity_score", -1)
     if github >= 60:
         score += 3
@@ -164,12 +213,10 @@ def score_candidate(candidate, job):
     elif github >= 30:
         score += 1
 
-    # Willing to relocate
     if signals.get("willing_to_relocate", False):
         score += 2
         reasons.append("Will relocate")
 
-    # Interview completion
     interview_rate = signals.get("interview_completion_rate", 1)
     if interview_rate < 0.4:
         score -= 3
