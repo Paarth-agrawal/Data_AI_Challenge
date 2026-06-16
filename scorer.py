@@ -2,51 +2,50 @@ from datetime import datetime, timezone
 
 def detect_honeypot(candidate):
     """
-    Only flag genuinely impossible profiles.
-    Be conservative — better to miss a honeypot than disqualify a real candidate.
+    Detect impossible/fake profiles. Be conservative —
+    better to miss a honeypot than disqualify a real candidate.
     """
-    profile = candidate.get("profile", {})
-    career  = candidate.get("career_history", [])
-    skills  = candidate.get("skills", [])
+    profile      = candidate.get("profile", {})
+    career       = candidate.get("career_history", [])
+    current_year = datetime.now().year
+    years_exp    = profile.get("years_of_experience", 0)
+    grad_year    = profile.get("graduation_year", 0)
 
-    current_year  = datetime.now().year
-    years_exp     = profile.get("years_of_experience", 0)
-    grad_year     = profile.get("graduation_year", 0)
-
-    # Check 1: Graduation year in the future
+    # Graduation year in the future
     if grad_year and grad_year > current_year:
         return True, f"Honeypot: graduation year {grad_year} is in the future"
 
-    # Check 2: Experience impossible given graduation year
-    # e.g. graduated 2022 but claims 15 years experience
+    # Experience impossible given graduation year
     if grad_year and grad_year > 0:
         max_possible = current_year - grad_year
         if years_exp > max_possible + 2:
             return True, f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
 
-    # Check 3: Worked at a company BEFORE it was founded
+    # Worked at a company BEFORE it was founded
     for job in career:
         founded    = job.get("company_founded_year", 0)
         start_year = job.get("start_year", 0)
         if founded and start_year and start_year < founded - 1:
             return True, "Honeypot: worked at company before it was founded"
 
-    # Check 4: Career history duration wildly exceeds claimed experience
-    # Only flag if career months are MORE than 3 years beyond claimed
+    # Career duration wildly exceeds claimed experience (>3 year gap)
     if career:
-        total_months  = sum(j.get("duration_months", 0) for j in career)
+        total_months   = sum(j.get("duration_months", 0) for j in career)
         claimed_months = years_exp * 12
         if total_months > claimed_months + 36:
-            return True, f"Honeypot: career history ({total_months}mo) far exceeds claimed exp ({claimed_months}mo)"
+            return True, (
+                f"Honeypot: career history ({total_months}mo) "
+                f"far exceeds claimed exp ({claimed_months}mo)"
+            )
 
-    # Check 5: Expert in 20+ skills — truly impossible
-    # (removed the 10+ check — 10 expert skills is realistic for senior engineers)
-    expert_skills = [
-        s for s in skills
+    # Expert in 20+ skills simultaneously — truly impossible
+    skills = candidate.get("skills", [])
+    expert_count = sum(
+        1 for s in skills
         if str(s.get("proficiency", "")).lower() in ["expert", "advanced"]
-    ]
-    if len(expert_skills) >= 20:
-        return True, "Honeypot: expert in 20+ skills simultaneously"
+    )
+    if expert_count >= 20:
+        return True, "Honeypot: expert/advanced in 20+ skills simultaneously"
 
     return False, ""
 
@@ -89,23 +88,26 @@ def score_candidate(candidate, job):
     if years_experience < 2:
         return 0.0, f"Disqualified: too junior ({years_experience} yrs)"
 
-    # 4. Junior title
-    for junior_flag in job.get("junior_title_flags", []):
-        if junior_flag in current_title:
-            return 0.0, f"Disqualified: junior level role ({current_title})"
+    # 4. Junior title — JD wants Senior level
+    for flag in job.get("junior_title_flags", []):
+        if flag in current_title:
+            return 0.0, f"Disqualified: junior role ({current_title})"
 
-    # ── 1. SKILL MATCH (50 points max) ───────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 1 — SKILL MATCH (45 points max)
+    # ══════════════════════════════════════════════════════════════════
+
     required_skills = [s.lower() for s in job.get("required_skills", [])]
     matched         = [s for s in required_skills if s in candidate_skills]
-    skill_score     = (len(matched) / len(required_skills)) * 50
+    skill_score     = (len(matched) / len(required_skills)) * 35
     score          += skill_score
 
     if len(matched) == 0:
         score -= 15
         reasons.append("No required skills matched")
     elif len(matched) == 1:
-        score -= 8
-        reasons.append(f"Only 1 skill matched: {matched[0]}")
+        score -= 5
+        reasons.append(f"Only 1 skill: {matched[0]}")
     else:
         reasons.append(f"Skills: {', '.join(matched[:5])}")
 
@@ -117,28 +119,52 @@ def score_candidate(candidate, job):
     if bonus_matched:
         reasons.append(f"Bonus: {', '.join(bonus_matched[:3])}")
 
-    # ── 2. EXPERIENCE (15 points max) ────────────────────────────────
+    # Skill assessment scores (5 points max)
+    # Actual test scores are far more reliable than self-reported skills
+    assessment_scores = signals.get("skill_assessment_scores", {})
+    assessment_map    = [s.lower() for s in job.get("assessment_skill_map", [])]
+    relevant_scores   = []
+
+    for skill_name, score_val in assessment_scores.items():
+        if skill_name.lower() in assessment_map:
+            relevant_scores.append(score_val)
+
+    if relevant_scores:
+        avg_assessment = sum(relevant_scores) / len(relevant_scores)
+        assessment_bonus = (avg_assessment / 100) * 5
+        score += assessment_bonus
+        reasons.append(
+            f"Assessment avg: {round(avg_assessment, 1)}/100 "
+            f"({len(relevant_scores)} tests)"
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 2 — EXPERIENCE (15 points max)
+    # ══════════════════════════════════════════════════════════════════
+
     min_exp = job.get("min_experience_years", 5)
     max_exp = job.get("max_experience_years", 9)
 
     if min_exp <= years_experience <= max_exp:
-        exp_score = 15
+        exp_score = 15          # Sweet spot
     elif years_experience > 12:
-        exp_score = 5
+        exp_score = 5           # Significantly overqualified
         reasons.append(f"Overqualified: {years_experience} yrs")
     elif years_experience > max_exp:
-        exp_score = 10
+        exp_score = 10          # Slightly over
     elif years_experience >= min_exp - 1:
-        exp_score = 8
+        exp_score = 8           # Slightly under
     else:
         exp_score = 3
     score += exp_score
-    if exp_score == 15:
-        reasons.append(f"{years_experience} yrs experience")
-    elif "Overqualified" not in " ".join(reasons):
-        reasons.append(f"{years_experience} yrs experience")
 
-    # ── 3. JOB TITLE (15 points max) ─────────────────────────────────
+    if "Overqualified" not in " ".join(reasons):
+        reasons.append(f"{years_experience} yrs exp")
+
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 3 — JOB TITLE (15 points max)
+    # ══════════════════════════════════════════════════════════════════
+
     title_matched = False
     for good in job.get("preferred_titles", []):
         if good.lower() in current_title:
@@ -150,14 +176,19 @@ def score_candidate(candidate, job):
     if not title_matched:
         reasons.append(f"Title: {current_title}")
 
-    # ── 4. CAREER QUALITY (10 points max) ────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 4 — CAREER QUALITY (10 points max)
+    # ══════════════════════════════════════════════════════════════════
+
     product_roles = 0
     for job_entry in career:
         company       = job_entry.get("company", "").lower()
         title         = job_entry.get("title", "").lower()
         is_consulting = any(firm in company for firm in consulting_firms)
-        is_tech_role  = any(t in title for t in ["engineer", "scientist",
-                                                   "developer", "researcher"])
+        is_tech_role  = any(
+            t in title for t in
+            ["engineer", "scientist", "developer", "researcher", "architect"]
+        )
         if not is_consulting and is_tech_role:
             product_roles += 1
 
@@ -168,58 +199,181 @@ def score_candidate(candidate, job):
         score += 5
         reasons.append("Some product history")
 
-    # ── 5. BEHAVIORAL SIGNALS (15 points max) ────────────────────────
-    if signals.get("open_to_work_flag", False):
-        score += 4
-        reasons.append("Open to work")
-    else:
-        score -= 3
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 5 — ALL 23 BEHAVIORAL SIGNALS (20 points max)
+    # ══════════════════════════════════════════════════════════════════
 
+    signal_score = 0
+
+    # Signal 1: profile_completeness_score (0-100)
+    # Incomplete profiles = candidate not serious
+    completeness = signals.get("profile_completeness_score", 0)
+    if completeness >= 80:
+        signal_score += 2
+        reasons.append(f"Complete profile ({completeness}%)")
+    elif completeness < 50:
+        signal_score -= 1
+
+    # Signal 2: signup_date — how long on platform (trust)
+    # (not heavily weighted — just presence check)
+
+    # Signal 3: last_active_date — recency is critical
     last_active = signals.get("last_active_date", "")
     if last_active:
         try:
-            last_date     = datetime.fromisoformat(last_active.replace("Z", "+00:00"))
+            last_date     = datetime.fromisoformat(
+                last_active.replace("Z", "+00:00")
+            )
             days_inactive = (datetime.now(timezone.utc) - last_date).days
-            if days_inactive <= 14:
-                score += 5
+            if days_inactive <= 7:
+                signal_score += 4
                 reasons.append("Active this week")
             elif days_inactive <= 30:
-                score += 4
+                signal_score += 3
                 reasons.append("Active this month")
             elif days_inactive <= 90:
-                score += 2
+                signal_score += 1
                 reasons.append("Active last 3 months")
             else:
-                score -= 4
+                signal_score -= 3
                 reasons.append(f"Inactive {days_inactive} days")
         except Exception:
             pass
 
+    # Signal 4: open_to_work_flag — most important availability signal
+    if signals.get("open_to_work_flag", False):
+        signal_score += 3
+        reasons.append("Open to work")
+    else:
+        signal_score -= 2
+
+    # Signal 5: profile_views_received_30d — market demand signal
+    views = signals.get("profile_views_received_30d", 0)
+    if views >= 20:
+        signal_score += 1
+        reasons.append(f"High profile views ({views})")
+
+    # Signal 6: applications_submitted_30d — actively searching
+    applications = signals.get("applications_submitted_30d", 0)
+    if applications >= 3:
+        signal_score += 1
+        reasons.append("Actively applying")
+
+    # Signal 7: recruiter_response_rate — will they respond?
     response_rate = signals.get("recruiter_response_rate", 0)
-    score        += round(response_rate * 4, 1)
-    reasons.append(f"Response rate: {int(response_rate * 100)}%")
+    signal_score += round(response_rate * 3, 1)
+    if response_rate >= 0.7:
+        reasons.append(f"High response rate ({int(response_rate*100)}%)")
+    elif response_rate < 0.3:
+        reasons.append(f"Low response rate ({int(response_rate*100)}%)")
+    else:
+        reasons.append(f"Response rate: {int(response_rate*100)}%")
 
+    # Signal 8: avg_response_time_hours — fast = engaged
+    avg_response = signals.get("avg_response_time_hours", 999)
+    if avg_response <= 24:
+        signal_score += 1
+        reasons.append("Fast responder")
+    elif avg_response >= 120:
+        signal_score -= 1
+
+    # Signal 9: skill_assessment_scores — handled in Section 1 above
+
+    # Signal 10: connection_count — network signal
+    connections = signals.get("connection_count", 0)
+    if connections >= 300:
+        signal_score += 0.5
+
+    # Signal 11: endorsements_received — social proof
+    endorsements = signals.get("endorsements_received", 0)
+    if endorsements >= 30:
+        signal_score += 0.5
+        reasons.append(f"Well endorsed ({endorsements})")
+
+    # Signal 12: notice_period_days — how soon can they join?
     notice = signals.get("notice_period_days", 90)
-    if notice <= 30:
-        score += 3
+    if notice == 0:
+        signal_score += 2
+        reasons.append("Immediate joiner")
+    elif notice <= 30:
+        signal_score += 1.5
         reasons.append(f"Notice: {notice}d")
-    elif notice > 60:
-        score -= 2
+    elif notice > 90:
+        signal_score -= 1.5
+        reasons.append(f"Long notice: {notice}d")
 
-    github = signals.get("github_activity_score", -1)
-    if github >= 60:
-        score += 3
-        reasons.append(f"GitHub: {github}")
-    elif github >= 30:
-        score += 1
+    # Signal 13: expected_salary_range_inr_lpa — budget fit
+    salary_info   = signals.get("expected_salary_range_inr_lpa", {})
+    salary_min    = salary_info.get("min", 0)
+    budget_max    = job.get("salary_budget_max_lpa", 40)
+    if salary_min > budget_max:
+        signal_score -= 2
+        reasons.append(f"Above budget (expects {salary_min}+ LPA)")
 
+    # Signal 14: preferred_work_mode
+    work_mode = signals.get("preferred_work_mode", "")
+    if work_mode in ["onsite", "hybrid", "flexible"]:
+        signal_score += 0.5
+
+    # Signal 15: willing_to_relocate
     if signals.get("willing_to_relocate", False):
-        score += 2
+        signal_score += 1
         reasons.append("Will relocate")
 
+    # Signal 16: github_activity_score (-1 means no GitHub)
+    github = signals.get("github_activity_score", -1)
+    if github >= 70:
+        signal_score += 2
+        reasons.append(f"Active GitHub ({github})")
+    elif github >= 40:
+        signal_score += 1
+        reasons.append(f"GitHub score: {github}")
+    elif github == -1:
+        signal_score -= 0.5  # No GitHub linked at all
+
+    # Signal 17: search_appearance_30d — recruiters are finding them
+    search_appearances = signals.get("search_appearance_30d", 0)
+    if search_appearances >= 200:
+        signal_score += 0.5
+
+    # Signal 18: saved_by_recruiters_30d — other recruiters want them
+    saved = signals.get("saved_by_recruiters_30d", 0)
+    if saved >= 5:
+        signal_score += 1.5
+        reasons.append(f"Saved by {saved} recruiters")
+    elif saved >= 2:
+        signal_score += 0.5
+
+    # Signal 19: interview_completion_rate — do they show up?
     interview_rate = signals.get("interview_completion_rate", 1)
-    if interview_rate < 0.4:
-        score -= 3
+    if interview_rate >= 0.8:
+        signal_score += 1
+    elif interview_rate < 0.4:
+        signal_score -= 2
         reasons.append("Low interview completion")
+
+    # Signal 20: offer_acceptance_rate (-1 = no prior offers)
+    offer_rate = signals.get("offer_acceptance_rate", -1)
+    if offer_rate >= 0.7:
+        signal_score += 1
+        reasons.append("High offer acceptance")
+    elif offer_rate >= 0 and offer_rate < 0.3:
+        signal_score -= 1
+
+    # Signal 21: verified_email — basic trust
+    if signals.get("verified_email", False):
+        signal_score += 0.5
+
+    # Signal 22: verified_phone — basic trust
+    if signals.get("verified_phone", False):
+        signal_score += 0.5
+
+    # Signal 23: linkedin_connected — professional presence
+    if signals.get("linkedin_connected", False):
+        signal_score += 0.5
+
+    # Cap signal score between -5 and 20
+    signal_score = max(-5, min(20, signal_score))
+    score       += signal_score
 
     return round(max(score, 0), 2), " | ".join(reasons)

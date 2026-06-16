@@ -1,4 +1,3 @@
-import json
 import csv
 import subprocess
 import jsonlines
@@ -7,62 +6,104 @@ from scorer import score_candidate
 
 def build_reasoning(title, years, matched_skills, signals, score):
     """
-    Build a human-readable 1-2 sentence reasoning string.
-    Uses data directly passed in — no recomputation.
+    Build specific, honest, human-readable reasoning.
+    Varies based on actual candidate strength — no templating.
     """
-    # Fix title capitalisation properly
+    # Fix capitalisation
     title_display = title.title()
-    title_display = title_display.replace(" Ai", " AI").replace("Ai ", "AI ")
-    title_display = title_display.replace(" Ml", " ML").replace("Ml ", "ML ")
-    title_display = title_display.replace("Nlp", "NLP").replace("Llm", "LLM")
-    title_display = title_display.replace("(Ml)", "(ML)").replace("(Ai)", "(AI)")
+    for old, new in [
+        (" Ai", " AI"), ("Ai ", "AI "), ("(Ai)", "(AI)"),
+        (" Ml", " ML"), ("Ml ", "ML "), ("(Ml)", "(ML)"),
+        ("Nlp", "NLP"), ("Llm", "LLM"), ("Faiss", "FAISS"),
+        ("Rag", "RAG"), ("Api", "API"), ("Sql", "SQL")
+    ]:
+        title_display = title_display.replace(old, new)
 
     open_to_work  = signals.get("open_to_work_flag", False)
     notice        = signals.get("notice_period_days", 90)
     response_rate = signals.get("recruiter_response_rate", 0)
     github        = signals.get("github_activity_score", -1)
+    saved         = signals.get("saved_by_recruiters_30d", 0)
+    offer_rate    = signals.get("offer_acceptance_rate", -1)
+    interview_rate = signals.get("interview_completion_rate", 1)
+    assessment    = signals.get("skill_assessment_scores", {})
 
     parts = []
 
-    # Skills sentence
-    if matched_skills:
-        top_skills = ", ".join(matched_skills[:3])
-        parts.append(f"strong {top_skills} background directly matches JD requirements")
-
-    # Availability
-    if open_to_work and notice <= 30:
-        parts.append(f"actively looking with {notice}-day notice period")
-    elif open_to_work:
-        parts.append("actively open to opportunities")
+    # Skills — specific language based on match depth
+    if len(matched_skills) >= 5:
+        top = ", ".join(matched_skills[:4])
+        parts.append(f"strong alignment across {len(matched_skills)} required skills including {top}")
+    elif len(matched_skills) >= 3:
+        top = ", ".join(matched_skills[:3])
+        parts.append(f"{top} background matches core JD requirements")
+    elif len(matched_skills) >= 1:
+        parts.append(f"partial skill match ({', '.join(matched_skills[:2])}); "
+                     f"other required skills not verified")
     else:
-        parts.append("not currently marked as open to work — may need outreach")
+        parts.append("no direct skill match found in profile")
 
-    # Positive signals
-    if response_rate >= 0.7:
-        parts.append(f"high recruiter response rate ({int(response_rate*100)}%)")
-    elif response_rate < 0.3:
+    # Assessment scores if available
+    rel_assessments = {
+        k: v for k, v in assessment.items()
+        if k.lower() in [s.lower() for s in JOB.get("assessment_skill_map", [])]
+    }
+    if rel_assessments:
+        best_skill = max(rel_assessments, key=rel_assessments.get)
+        best_score = rel_assessments[best_skill]
+        parts.append(f"verified {best_skill} assessment score: {best_score}/100")
+
+    # Availability — specific and honest
+    if open_to_work and notice == 0:
+        parts.append("immediately available")
+    elif open_to_work and notice <= 30:
+        parts.append(f"actively looking, {notice}-day notice")
+    elif open_to_work:
+        parts.append(f"open to work but {notice}-day notice period")
+    else:
+        parts.append("not currently marked open to work — outreach needed")
+
+    # Response rate — only mention if notable
+    if response_rate >= 0.75:
+        parts.append(f"highly responsive ({int(response_rate*100)}%)")
+    elif response_rate < 0.25:
         parts.append(f"low response rate ({int(response_rate*100)}%) is a concern")
 
-    if github >= 60:
-        parts.append(f"active GitHub presence (score: {github})")
+    # GitHub
+    if github >= 70:
+        parts.append(f"strong GitHub activity (score: {github})")
+    elif github >= 40:
+        parts.append(f"moderate GitHub presence ({github})")
 
-    # Build final string
+    # Market demand
+    if saved >= 5:
+        parts.append(f"saved by {saved} other recruiters recently")
+
+    # Offer acceptance
+    if offer_rate >= 0.7:
+        parts.append("strong offer acceptance history")
+    elif 0 <= offer_rate < 0.3:
+        parts.append("low historical offer acceptance — may be selective")
+
+    # Build sentence — top 3 most important parts only
     opening   = f"{title_display} with {years} years of experience"
     body      = "; ".join(parts[:3])
     reasoning = f"{opening}; {body}."
 
-    # Honest concerns
+    # Honest closing concern if needed
     if years > 12:
-        reasoning += f" Note: {years} years experience may be overqualified for this role."
-    elif score < 50:
-        reasoning += " Profile is adjacent to requirements but below ideal fit threshold."
+        reasoning += f" Seniority ({years} yrs) may be above role level."
+    elif score < 30:
+        reasoning += " Overall profile is below ideal fit threshold for this role."
+    elif interview_rate < 0.4:
+        reasoning += " Note: low interview completion rate is a hiring risk."
 
     return reasoning
 
 
 # ── LOAD AND SCORE ────────────────────────────────────────────────────
-print("Loading and scoring all candidates...")
-print("This will take 2-4 minutes. Please wait...\n")
+print("Loading and scoring all 100,000 candidates...")
+print("Please wait — this takes 2-4 minutes...\n")
 
 results               = []
 disqualified          = 0
@@ -81,7 +122,6 @@ with jsonlines.open("candidates.jsonl") as reader:
         title    = profile.get("current_title", "")
         years    = profile.get("years_of_experience", 0)
 
-        # Compute matched skills once — used in reasoning
         candidate_skills_lower = [s["name"].lower() for s in skills]
         matched_skills = [
             s for s in required_skills_lower
@@ -91,7 +131,9 @@ with jsonlines.open("candidates.jsonl") as reader:
         if score == 0:
             disqualified += 1
 
-        reasoning = build_reasoning(title, years, matched_skills, signals, score)
+        reasoning = build_reasoning(
+            title, years, matched_skills, signals, score
+        )
 
         results.append({
             "candidate_id": candidate["candidate_id"],
@@ -110,9 +152,9 @@ print("\nSorting results...")
 results.sort(key=lambda x: x["score"], reverse=True)
 
 qualified = total - disqualified
-print(f"\nTotal candidates : {total:,}")
-print(f"Disqualified     : {disqualified:,}")
-print(f"Qualified        : {qualified:,}")
+print(f"\nTotal     : {total:,}")
+print(f"Qualified : {qualified:,}")
+print(f"Disqualified: {disqualified:,}")
 
 # ── PRINT TOP 10 ──────────────────────────────────────────────────────
 print("\n========== TOP 10 CANDIDATES ==========\n")
@@ -135,11 +177,10 @@ with open("submission.csv", "w", newline="", encoding="utf-8") as f:
             r["score"],
             r["reasoning"]
         ])
-
 print("submission.csv saved!")
 
-# ── AUTO VALIDATE ─────────────────────────────────────────────────────
-print("\nValidating format...")
+# ── VALIDATE ──────────────────────────────────────────────────────────
+print("\nValidating...")
 result = subprocess.run(
     ["python", "validate_submission.py", "submission.csv"],
     capture_output=True, text=True
