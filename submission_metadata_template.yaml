@@ -1,21 +1,24 @@
-team_name: "Punisher"
+team_name: "Team Paarth"
 primary_contact_name: "Paarth Agrawal"
-primary_contact_email: "your_email@gmail.com"
-primary_contact_phone: "your_phone_number"
+primary_contact_email: "YOUR_EMAIL_HERE"
+primary_contact_phone: "YOUR_PHONE_HERE"
 github_repository_url: "https://github.com/Paarth-agrawal/Data_AI_Challenge"
 sandbox_demo_link: "https://data-ai-challenge.streamlit.app/"
 ai_tools_declared:
   - Claude
+compute_environment: "Windows 11, Python 3.12, 16GB RAM, CPU only, under 3 minutes"
 team_members:
   - name: "Paarth Agrawal"
-    email: "your_email@gmail.com"
-compute_environment: "Windows 11, Python 3.12, 16GB RAM, CPU only"
+    email: "YOUR_EMAIL_HERE"
+  - name: "Piyush Jakhar"
+    email: "PIYUSH_EMAIL_HERE"
 methodology_summary: >
-  Multi-signal scoring system that ranks candidates for a Senior AI 
-  Engineer role. Evaluates skill match (50pts), experience sweet spot 
-  5-9 years (15pts), job title relevance (15pts), product company 
-  career quality (10pts), and behavioral signals including open-to-work 
-  status, recency, GitHub activity and response rate (15pts). Includes 
-  instant disqualifiers for unrelated job functions, consulting-only 
-  careers, and honeypot detection. Processes 100K candidates in under 
-  3 minutes on CPU only with no external API calls.
+  Multi-signal scoring system ranking candidates for a Senior AI Engineer 
+  role. Uses skill match against 14 JD requirements (35pts), verified 
+  skill assessment scores (5pts), bonus skills (5pts), experience sweet 
+  spot 5-9 years (15pts), job title relevance (15pts), product company 
+  career quality (10pts), and all 23 Redrob behavioral signals (20pts). 
+  Includes instant disqualifiers for unrelated roles, consulting-only 
+  careers, junior titles, and honeypot detection. Scores normalized 0-1. 
+  Processes 100K candidates in under 3 minutes on CPU only with no 
+  external API calls.
