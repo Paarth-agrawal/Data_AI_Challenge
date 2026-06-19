@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+
 def detect_honeypot(candidate):
     """
     Detect impossible/fake profiles. Be conservative —
@@ -19,7 +20,9 @@ def detect_honeypot(candidate):
     if grad_year and grad_year > 0:
         max_possible = current_year - grad_year
         if years_exp > max_possible + 2:
-            return True, f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
+            return True, (
+                f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
+            )
 
     # Worked at a company BEFORE it was founded
     for job in career:
@@ -28,7 +31,7 @@ def detect_honeypot(candidate):
         if founded and start_year and start_year < founded - 1:
             return True, "Honeypot: worked at company before it was founded"
 
-    # Career duration wildly exceeds claimed experience (>3 year gap)
+    # Career duration wildly exceeds claimed experience (> 3 year gap)
     if career:
         total_months   = sum(j.get("duration_months", 0) for j in career)
         claimed_months = years_exp * 12
@@ -120,7 +123,6 @@ def score_candidate(candidate, job):
         reasons.append(f"Bonus: {', '.join(bonus_matched[:3])}")
 
     # Skill assessment scores (5 points max)
-    # Actual test scores are far more reliable than self-reported skills
     assessment_scores = signals.get("skill_assessment_scores", {})
     assessment_map    = [s.lower() for s in job.get("assessment_skill_map", [])]
     relevant_scores   = []
@@ -130,9 +132,9 @@ def score_candidate(candidate, job):
             relevant_scores.append(score_val)
 
     if relevant_scores:
-        avg_assessment = sum(relevant_scores) / len(relevant_scores)
+        avg_assessment   = sum(relevant_scores) / len(relevant_scores)
         assessment_bonus = (avg_assessment / 100) * 5
-        score += assessment_bonus
+        score           += assessment_bonus
         reasons.append(
             f"Assessment avg: {round(avg_assessment, 1)}/100 "
             f"({len(relevant_scores)} tests)"
@@ -146,14 +148,14 @@ def score_candidate(candidate, job):
     max_exp = job.get("max_experience_years", 9)
 
     if min_exp <= years_experience <= max_exp:
-        exp_score = 15          # Sweet spot
+        exp_score = 15
     elif years_experience > 12:
-        exp_score = 5           # Significantly overqualified
+        exp_score = 5
         reasons.append(f"Overqualified: {years_experience} yrs")
     elif years_experience > max_exp:
-        exp_score = 10          # Slightly over
+        exp_score = 10
     elif years_experience >= min_exp - 1:
-        exp_score = 8           # Slightly under
+        exp_score = 8
     else:
         exp_score = 3
     score += exp_score
@@ -205,8 +207,7 @@ def score_candidate(candidate, job):
 
     signal_score = 0
 
-    # Signal 1: profile_completeness_score (0-100)
-    # Incomplete profiles = candidate not serious
+    # Signal 1: profile_completeness_score
     completeness = signals.get("profile_completeness_score", 0)
     if completeness >= 80:
         signal_score += 2
@@ -214,8 +215,16 @@ def score_candidate(candidate, job):
     elif completeness < 50:
         signal_score -= 1
 
-    # Signal 2: signup_date — how long on platform (trust)
-    # (not heavily weighted — just presence check)
+    # Signal 2: signup_date — platform tenure (minor trust signal)
+    signup = signals.get("signup_date", "")
+    if signup:
+        try:
+            signup_date = datetime.fromisoformat(signup.replace("Z", "+00:00"))
+            days_on_platform = (datetime.now(timezone.utc) - signup_date).days
+            if days_on_platform > 180:
+                signal_score += 0.5  # Established member
+        except Exception:
+            pass
 
     # Signal 3: last_active_date — recency is critical
     last_active = signals.get("last_active_date", "")
@@ -240,26 +249,31 @@ def score_candidate(candidate, job):
         except Exception:
             pass
 
-    # Signal 4: open_to_work_flag — most important availability signal
+    # Signal 4: open_to_work_flag
     if signals.get("open_to_work_flag", False):
         signal_score += 3
         reasons.append("Open to work")
     else:
         signal_score -= 2
 
-    # Signal 5: profile_views_received_30d — market demand signal
+    # Signal 5: profile_views_received_30d
     views = signals.get("profile_views_received_30d", 0)
     if views >= 20:
         signal_score += 1
         reasons.append(f"High profile views ({views})")
+    elif views >= 10:
+        signal_score += 0.5
 
-    # Signal 6: applications_submitted_30d — actively searching
+    # Signal 6: applications_submitted_30d — fixed threshold to >= 1
     applications = signals.get("applications_submitted_30d", 0)
-    if applications >= 3:
-        signal_score += 1
+    if applications >= 5:
+        signal_score += 1.5
+        reasons.append("Very actively applying")
+    elif applications >= 1:
+        signal_score += 0.5
         reasons.append("Actively applying")
 
-    # Signal 7: recruiter_response_rate — will they respond?
+    # Signal 7: recruiter_response_rate
     response_rate = signals.get("recruiter_response_rate", 0)
     signal_score += round(response_rate * 3, 1)
     if response_rate >= 0.7:
@@ -269,7 +283,7 @@ def score_candidate(candidate, job):
     else:
         reasons.append(f"Response rate: {int(response_rate*100)}%")
 
-    # Signal 8: avg_response_time_hours — fast = engaged
+    # Signal 8: avg_response_time_hours
     avg_response = signals.get("avg_response_time_hours", 999)
     if avg_response <= 24:
         signal_score += 1
@@ -277,20 +291,24 @@ def score_candidate(candidate, job):
     elif avg_response >= 120:
         signal_score -= 1
 
-    # Signal 9: skill_assessment_scores — handled in Section 1 above
+    # Signal 9: skill_assessment_scores — handled in Section 1
 
-    # Signal 10: connection_count — network signal
+    # Signal 10: connection_count
     connections = signals.get("connection_count", 0)
-    if connections >= 300:
+    if connections >= 500:
+        signal_score += 1
+    elif connections >= 300:
         signal_score += 0.5
 
-    # Signal 11: endorsements_received — social proof
+    # Signal 11: endorsements_received
     endorsements = signals.get("endorsements_received", 0)
     if endorsements >= 30:
-        signal_score += 0.5
+        signal_score += 1
         reasons.append(f"Well endorsed ({endorsements})")
+    elif endorsements >= 15:
+        signal_score += 0.5
 
-    # Signal 12: notice_period_days — how soon can they join?
+    # Signal 12: notice_period_days
     notice = signals.get("notice_period_days", 90)
     if notice == 0:
         signal_score += 2
@@ -302,10 +320,10 @@ def score_candidate(candidate, job):
         signal_score -= 1.5
         reasons.append(f"Long notice: {notice}d")
 
-    # Signal 13: expected_salary_range_inr_lpa — budget fit
-    salary_info   = signals.get("expected_salary_range_inr_lpa", {})
-    salary_min    = salary_info.get("min", 0)
-    budget_max    = job.get("salary_budget_max_lpa", 40)
+    # Signal 13: expected_salary_range_inr_lpa
+    salary_info = signals.get("expected_salary_range_inr_lpa", {})
+    salary_min  = salary_info.get("min", 0)
+    budget_max  = job.get("salary_budget_max_lpa", 40)
     if salary_min > budget_max:
         signal_score -= 2
         reasons.append(f"Above budget (expects {salary_min}+ LPA)")
@@ -320,7 +338,7 @@ def score_candidate(candidate, job):
         signal_score += 1
         reasons.append("Will relocate")
 
-    # Signal 16: github_activity_score (-1 means no GitHub)
+    # Signal 16: github_activity_score
     github = signals.get("github_activity_score", -1)
     if github >= 70:
         signal_score += 2
@@ -329,14 +347,14 @@ def score_candidate(candidate, job):
         signal_score += 1
         reasons.append(f"GitHub score: {github}")
     elif github == -1:
-        signal_score -= 0.5  # No GitHub linked at all
+        signal_score -= 0.5
 
-    # Signal 17: search_appearance_30d — recruiters are finding them
+    # Signal 17: search_appearance_30d
     search_appearances = signals.get("search_appearance_30d", 0)
     if search_appearances >= 200:
         signal_score += 0.5
 
-    # Signal 18: saved_by_recruiters_30d — other recruiters want them
+    # Signal 18: saved_by_recruiters_30d
     saved = signals.get("saved_by_recruiters_30d", 0)
     if saved >= 5:
         signal_score += 1.5
@@ -344,7 +362,7 @@ def score_candidate(candidate, job):
     elif saved >= 2:
         signal_score += 0.5
 
-    # Signal 19: interview_completion_rate — do they show up?
+    # Signal 19: interview_completion_rate
     interview_rate = signals.get("interview_completion_rate", 1)
     if interview_rate >= 0.8:
         signal_score += 1
@@ -352,23 +370,23 @@ def score_candidate(candidate, job):
         signal_score -= 2
         reasons.append("Low interview completion")
 
-    # Signal 20: offer_acceptance_rate (-1 = no prior offers)
+    # Signal 20: offer_acceptance_rate
     offer_rate = signals.get("offer_acceptance_rate", -1)
     if offer_rate >= 0.7:
         signal_score += 1
         reasons.append("High offer acceptance")
-    elif offer_rate >= 0 and offer_rate < 0.3:
+    elif 0 <= offer_rate < 0.3:
         signal_score -= 1
 
-    # Signal 21: verified_email — basic trust
+    # Signal 21: verified_email
     if signals.get("verified_email", False):
         signal_score += 0.5
 
-    # Signal 22: verified_phone — basic trust
+    # Signal 22: verified_phone
     if signals.get("verified_phone", False):
         signal_score += 0.5
 
-    # Signal 23: linkedin_connected — professional presence
+    # Signal 23: linkedin_connected
     if signals.get("linkedin_connected", False):
         signal_score += 0.5
 

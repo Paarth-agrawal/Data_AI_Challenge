@@ -5,6 +5,7 @@ import jsonlines
 from job_description import JOB
 from scorer import score_candidate
 
+
 def build_reasoning(title, years, matched_skills, signals, score):
     """
     Build specific, honest, human-readable reasoning.
@@ -57,9 +58,7 @@ def build_reasoning(title, years, matched_skills, signals, score):
     if rel_assessments:
         best_skill = max(rel_assessments, key=rel_assessments.get)
         best_score = rel_assessments[best_skill]
-        parts.append(
-            f"verified {best_skill} assessment: {best_score}/100"
-        )
+        parts.append(f"verified {best_skill} assessment: {best_score}/100")
 
     # Availability
     if open_to_work and notice == 0:
@@ -93,7 +92,7 @@ def build_reasoning(title, years, matched_skills, signals, score):
     elif 0 <= offer_rate < 0.3:
         parts.append("historically declines offers — may be selective")
 
-    # Build sentence
+    # Build sentence — top 3 most important parts only
     opening   = f"{title_display} with {years} years of experience"
     body      = "; ".join(parts[:3])
     reasoning = f"{opening}; {body}."
@@ -157,13 +156,14 @@ def run_ranking(candidates_path, output_path):
             if total % 10000 == 0:
                 print(f"  Processed {total:,} candidates...")
 
-    # Sort by score
+    # Sort by score DESC, then candidate_id ASC for deterministic tie-breaking
+    # This is required by the spec when scores are equal
     print("\nSorting results...")
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: (-x["score"], x["candidate_id"]))
 
     # Normalize scores to 0-1 range
-    max_score = results[0]["score"] if results else 1
-    min_score = results[-1]["score"] if results else 0
+    max_score   = results[0]["score"]  if results else 1
+    min_score   = results[-1]["score"] if results else 0
     score_range = max_score - min_score if max_score != min_score else 1
 
     for r in results:
@@ -175,7 +175,10 @@ def run_ranking(candidates_path, output_path):
     print(f"\nTotal        : {total:,}")
     print(f"Qualified    : {qualified:,}")
     print(f"Disqualified : {disqualified:,}")
-    print(f"Top score    : {results[0]['score']} → normalized: {results[0]['normalized_score']}")
+    print(
+        f"Top score    : {results[0]['score']} "
+        f"→ normalized: {results[0]['normalized_score']}"
+    )
 
     # Print top 10
     print("\n========== TOP 10 CANDIDATES ==========\n")
@@ -212,7 +215,6 @@ def run_ranking(candidates_path, output_path):
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Support command line: python main.py --candidates X --out Y
     candidates_path = "candidates.jsonl"
     output_path     = "submission.csv"
 
