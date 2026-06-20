@@ -10,28 +10,26 @@ def detect_honeypot(candidate):
     career       = candidate.get("career_history", [])
     current_year = datetime.now().year
     years_exp    = profile.get("years_of_experience", 0)
-    grad_year    = profile.get("graduation_year", 0)
+    grad_year    = 0
 
-    # Graduation year in the future
+    education = candidate.get("education", [])
+    if education and isinstance(education, list):
+        grad_year = education[0].get("end_year", 0)
+
     if grad_year and grad_year > current_year:
         return True, f"Honeypot: graduation year {grad_year} is in the future"
 
-    # Experience impossible given graduation year
     if grad_year and grad_year > 0:
         max_possible = current_year - grad_year
         if years_exp > max_possible + 2:
-            return True, (
-                f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
-            )
+            return True, f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
 
-    # Worked at a company BEFORE it was founded
     for job in career:
         founded    = job.get("company_founded_year", 0)
         start_year = job.get("start_year", 0)
         if founded and start_year and start_year < founded - 1:
             return True, "Honeypot: worked at company before it was founded"
 
-    # Career duration wildly exceeds claimed experience (> 3 year gap)
     if career:
         total_months   = sum(j.get("duration_months", 0) for j in career)
         claimed_months = years_exp * 12
@@ -41,7 +39,6 @@ def detect_honeypot(candidate):
                 f"far exceeds claimed exp ({claimed_months}mo)"
             )
 
-    # Expert in 20+ skills simultaneously — truly impossible
     skills = candidate.get("skills", [])
     expert_count = sum(
         1 for s in skills
@@ -62,10 +59,20 @@ def score_candidate(candidate, job):
     signals          = candidate.get("redrob_signals", {})
     career           = candidate.get("career_history", [])
     skills           = candidate.get("skills", [])
+    education        = candidate.get("education", [])
     current_title    = profile.get("current_title", "").lower()
     years_experience = profile.get("years_of_experience", 0)
     consulting_firms = job.get("consulting_firms", [])
     candidate_skills = [s["name"].lower() for s in skills]
+    summary          = profile.get("summary", "").lower()
+    headline         = profile.get("headline", "").lower()
+    location         = profile.get("location", "").lower()
+    country          = profile.get("country", "").lower()
+
+    # Build full text for keyword search
+    full_text = summary + " " + headline + " "
+    for j in career:
+        full_text += j.get("description", "").lower() + " "
 
     # ── HONEYPOT CHECK ────────────────────────────────────────────────
     is_honeypot, honeypot_reason = detect_honeypot(candidate)
@@ -74,12 +81,10 @@ def score_candidate(candidate, job):
 
     # ── INSTANT DISQUALIFIERS ─────────────────────────────────────────
 
-    # 1. Completely unrelated job function
     for bad in job.get("avoid_titles", []):
         if bad.lower() in current_title:
             return 0.0, f"Disqualified: unrelated role ({current_title})"
 
-    # 2. Entire career at consulting firms only
     all_companies = [j.get("company", "").lower() for j in career]
     if all_companies and all(
         any(firm in company for firm in consulting_firms)
@@ -87,17 +92,15 @@ def score_candidate(candidate, job):
     ):
         return 0.0, "Disqualified: entire career at consulting firms"
 
-    # 3. Less than 2 years experience
     if years_experience < 2:
         return 0.0, f"Disqualified: too junior ({years_experience} yrs)"
 
-    # 4. Junior title — JD wants Senior level
     for flag in job.get("junior_title_flags", []):
         if flag in current_title:
             return 0.0, f"Disqualified: junior role ({current_title})"
 
     # ══════════════════════════════════════════════════════════════════
-    # SECTION 1 — SKILL MATCH (45 points max)
+    # SECTION 1 — SKILL MATCH (35 points max)
     # ══════════════════════════════════════════════════════════════════
 
     required_skills = [s.lower() for s in job.get("required_skills", [])]
@@ -126,19 +129,33 @@ def score_candidate(candidate, job):
     assessment_scores = signals.get("skill_assessment_scores", {})
     assessment_map    = [s.lower() for s in job.get("assessment_skill_map", [])]
     relevant_scores   = []
-
     for skill_name, score_val in assessment_scores.items():
         if skill_name.lower() in assessment_map:
             relevant_scores.append(score_val)
-
     if relevant_scores:
         avg_assessment   = sum(relevant_scores) / len(relevant_scores)
         assessment_bonus = (avg_assessment / 100) * 5
         score           += assessment_bonus
         reasons.append(
-            f"Assessment avg: {round(avg_assessment, 1)}/100 "
-            f"({len(relevant_scores)} tests)"
+            f"Assessment avg: {round(avg_assessment, 1)}/100"
         )
+
+    # Career description keyword bonus (5 points max)
+    # The JD says read what people ACTUALLY DID not just their title
+    ai_keywords = [
+        "embedding", "vector", "retrieval", "ranking", "recommendation",
+        "nlp", "transformer", "fine-tun", "rag", "semantic search",
+        "faiss", "elasticsearch", "pinecone", "weaviate", "qdrant",
+        "pytorch", "tensorflow", "machine learning", "deep learning",
+        "llm", "language model", "information retrieval"
+    ]
+    keyword_hits = sum(1 for kw in ai_keywords if kw in full_text)
+    desc_bonus = min(5, keyword_hits * 0.5)
+    score += desc_bonus
+    if keyword_hits >= 4:
+        reasons.append(f"Strong AI work in career history")
+    elif keyword_hits >= 2:
+        reasons.append(f"Some AI work in career history")
 
     # ══════════════════════════════════════════════════════════════════
     # SECTION 2 — EXPERIENCE (15 points max)
@@ -182,27 +199,61 @@ def score_candidate(candidate, job):
     # SECTION 4 — CAREER QUALITY (10 points max)
     # ══════════════════════════════════════════════════════════════════
 
-    product_roles = 0
+    product_roles    = 0
+    it_services_only = True
+
     for job_entry in career:
         company       = job_entry.get("company", "").lower()
         title         = job_entry.get("title", "").lower()
+        industry      = job_entry.get("industry", "").lower()
+        company_size  = job_entry.get("company_size", "")
         is_consulting = any(firm in company for firm in consulting_firms)
+        is_it_services = "it service" in industry or "outsourc" in industry
         is_tech_role  = any(
             t in title for t in
             ["engineer", "scientist", "developer", "researcher", "architect"]
         )
-        if not is_consulting and is_tech_role:
+
+        if not is_consulting and not is_it_services and is_tech_role:
             product_roles += 1
+            it_services_only = False
+        elif not is_consulting and not is_it_services:
+            it_services_only = False
 
     if product_roles >= 3:
         score += 10
-        reasons.append("Strong product history")
+        reasons.append("Strong product company history")
     elif product_roles >= 1:
         score += 5
-        reasons.append("Some product history")
+        reasons.append("Some product company experience")
+
+    # Education tier bonus (3 points max)
+    # JD values strong technical backgrounds
+    if education and isinstance(education, list):
+        tier = education[0].get("tier", "")
+        if tier == "tier_1":
+            score += 3
+            reasons.append("Tier-1 institution")
+        elif tier == "tier_2":
+            score += 1
 
     # ══════════════════════════════════════════════════════════════════
-    # SECTION 5 — ALL 23 BEHAVIORAL SIGNALS (20 points max)
+    # SECTION 5 — LOCATION (3 points max)
+    # JD: Pune/Noida preferred; Delhi NCR, Hyderabad, Mumbai welcome
+    # Outside India: case-by-case but no visa sponsorship
+    # ══════════════════════════════════════════════════════════════════
+
+    preferred_cities = ["pune", "noida", "delhi", "hyderabad", "mumbai",
+                        "bangalore", "bengaluru", "chennai", "gurugram", "gurgaon"]
+    if country == "india" or any(city in location for city in preferred_cities):
+        score += 3
+        reasons.append("India-based")
+    elif country and country != "india":
+        score -= 2
+        reasons.append(f"Outside India ({profile.get('country', '')})")
+
+    # ══════════════════════════════════════════════════════════════════
+    # SECTION 6 — ALL 23 BEHAVIORAL SIGNALS (20 points max)
     # ══════════════════════════════════════════════════════════════════
 
     signal_score = 0
@@ -215,18 +266,18 @@ def score_candidate(candidate, job):
     elif completeness < 50:
         signal_score -= 1
 
-    # Signal 2: signup_date — platform tenure (minor trust signal)
+    # Signal 2: signup_date
     signup = signals.get("signup_date", "")
     if signup:
         try:
-            signup_date = datetime.fromisoformat(signup.replace("Z", "+00:00"))
+            signup_date      = datetime.fromisoformat(signup.replace("Z", "+00:00"))
             days_on_platform = (datetime.now(timezone.utc) - signup_date).days
             if days_on_platform > 180:
-                signal_score += 0.5  # Established member
+                signal_score += 0.5
         except Exception:
             pass
 
-    # Signal 3: last_active_date — recency is critical
+    # Signal 3: last_active_date
     last_active = signals.get("last_active_date", "")
     if last_active:
         try:
@@ -264,7 +315,7 @@ def score_candidate(candidate, job):
     elif views >= 10:
         signal_score += 0.5
 
-    # Signal 6: applications_submitted_30d — fixed threshold to >= 1
+    # Signal 6: applications_submitted_30d
     applications = signals.get("applications_submitted_30d", 0)
     if applications >= 5:
         signal_score += 1.5
@@ -291,7 +342,7 @@ def score_candidate(candidate, job):
     elif avg_response >= 120:
         signal_score -= 1
 
-    # Signal 9: skill_assessment_scores — handled in Section 1
+    # Signal 9: skill_assessment_scores — handled above
 
     # Signal 10: connection_count
     connections = signals.get("connection_count", 0)
@@ -390,7 +441,6 @@ def score_candidate(candidate, job):
     if signals.get("linkedin_connected", False):
         signal_score += 0.5
 
-    # Cap signal score between -5 and 20
     signal_score = max(-5, min(20, signal_score))
     score       += signal_score
 

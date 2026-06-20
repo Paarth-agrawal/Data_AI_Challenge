@@ -6,11 +6,19 @@ from job_description import JOB
 from scorer import score_candidate
 
 
-def build_reasoning(title, years, matched_skills, signals, score):
+def build_reasoning(candidate, title, years, matched_skills, signals, score):
     """
-    Build specific, honest, human-readable reasoning.
-    Varies based on actual candidate strength.
+    Build specific, honest reasoning using ALL available candidate data
+    including career description text, summary, location.
     """
+    profile  = candidate.get("profile", {})
+    career   = candidate.get("career_history", [])
+    education = candidate.get("education", [])
+
+    summary  = profile.get("summary", "")
+    location = profile.get("location", "")
+    country  = profile.get("country", "")
+
     # Fix capitalisation
     title_display = title.title()
     for old, new in [
@@ -32,7 +40,7 @@ def build_reasoning(title, years, matched_skills, signals, score):
 
     parts = []
 
-    # Skills — specific language based on match depth
+    # Skills match depth
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
         parts.append(
@@ -48,9 +56,22 @@ def build_reasoning(title, years, matched_skills, signals, score):
             f"other required skills not verified"
         )
     else:
-        parts.append("no direct skill match found in profile")
+        # Check career descriptions for actual AI work
+        full_text = summary.lower()
+        for j in career:
+            full_text += j.get("description", "").lower()
+        ai_terms = ["embedding", "retrieval", "ranking", "recommendation",
+                    "nlp", "vector", "transformer", "rag", "semantic"]
+        found_terms = [t for t in ai_terms if t in full_text]
+        if found_terms:
+            parts.append(
+                f"no listed AI skills but career shows {found_terms[0]} "
+                f"and related work"
+            )
+        else:
+            parts.append("no direct AI skill match found in profile")
 
-    # Assessment scores if available
+    # Assessment scores
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [s.lower() for s in JOB.get("assessment_skill_map", [])]
@@ -69,6 +90,10 @@ def build_reasoning(title, years, matched_skills, signals, score):
         parts.append(f"open to work but {notice}-day notice period")
     else:
         parts.append("not marked open to work — outreach needed")
+
+    # Location
+    if country and country.lower() != "india":
+        parts.append(f"based outside India ({location}) — relocation needed")
 
     # Response rate
     if response_rate >= 0.75:
@@ -90,14 +115,21 @@ def build_reasoning(title, years, matched_skills, signals, score):
     if offer_rate >= 0.7:
         parts.append("strong offer acceptance history")
     elif 0 <= offer_rate < 0.3:
-        parts.append("historically declines offers — may be selective")
+        parts.append("historically declines offers")
 
-    # Build sentence — top 3 most important parts only
+    # Education
+    if education and isinstance(education, list):
+        tier = education[0].get("tier", "")
+        inst = education[0].get("institution", "")
+        if tier == "tier_1":
+            parts.append(f"Tier-1 education ({inst})")
+
+    # Build final reasoning
     opening   = f"{title_display} with {years} years of experience"
     body      = "; ".join(parts[:3])
     reasoning = f"{opening}; {body}."
 
-    # Honest closing concern
+    # Honest closing concerns
     if years > 12:
         reasoning += f" Seniority ({years} yrs) may be above role level."
     elif score < 30:
@@ -109,8 +141,6 @@ def build_reasoning(title, years, matched_skills, signals, score):
 
 
 def run_ranking(candidates_path, output_path):
-    """Main ranking function — reads candidates, scores, writes CSV."""
-
     print(f"Loading and scoring candidates from {candidates_path}...")
     print("Please wait — this takes 2-4 minutes...\n")
 
@@ -141,7 +171,7 @@ def run_ranking(candidates_path, output_path):
                 disqualified += 1
 
             reasoning = build_reasoning(
-                title, years, matched_skills, signals, score
+                candidate, title, years, matched_skills, signals, score
             )
 
             results.append({
@@ -156,12 +186,9 @@ def run_ranking(candidates_path, output_path):
             if total % 10000 == 0:
                 print(f"  Processed {total:,} candidates...")
 
-    # Sort by score DESC, then candidate_id ASC for deterministic tie-breaking
-    # This is required by the spec when scores are equal
     print("\nSorting results...")
     results.sort(key=lambda x: (-x["score"], x["candidate_id"]))
 
-    # Normalize scores to 0-1 range
     max_score   = results[0]["score"]  if results else 1
     min_score   = results[-1]["score"] if results else 0
     score_range = max_score - min_score if max_score != min_score else 1
@@ -180,7 +207,6 @@ def run_ranking(candidates_path, output_path):
         f"→ normalized: {results[0]['normalized_score']}"
     )
 
-    # Print top 10
     print("\n========== TOP 10 CANDIDATES ==========\n")
     for i, r in enumerate(results[:10], 1):
         print(f"#{i}  {r['name']}")
@@ -189,7 +215,6 @@ def run_ranking(candidates_path, output_path):
         print(f"     Reasoning: {r['reasoning']}")
         print()
 
-    # Save CSV with normalized scores
     print(f"Saving {output_path}...")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -201,9 +226,8 @@ def run_ranking(candidates_path, output_path):
                 r["normalized_score"],
                 r["reasoning"]
             ])
-    print(f"{output_path} saved with top 100 candidates!")
+    print(f"{output_path} saved!")
 
-    # Validate
     print("\nValidating format...")
     result = subprocess.run(
         ["python", "validate_submission.py", output_path],
@@ -213,7 +237,6 @@ def run_ranking(candidates_path, output_path):
     print("\n===== DONE =====")
 
 
-# ── ENTRY POINT ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     candidates_path = "candidates.jsonl"
     output_path     = "submission.csv"
