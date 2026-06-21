@@ -7,17 +7,12 @@ from scorer import score_candidate
 
 
 def build_reasoning(candidate, title, years, matched_skills, signals, score):
-    """
-    Build specific, honest reasoning using ALL available candidate data
-    including career description text, summary, location.
-    """
-    profile  = candidate.get("profile", {})
-    career   = candidate.get("career_history", [])
+    profile   = candidate.get("profile", {})
+    career    = candidate.get("career_history", [])
     education = candidate.get("education", [])
-
-    summary  = profile.get("summary", "")
-    location = profile.get("location", "")
-    country  = profile.get("country", "")
+    summary   = profile.get("summary", "")
+    location  = profile.get("location", "")
+    country   = profile.get("country", "")
 
     # Fix capitalisation
     title_display = title.title()
@@ -37,10 +32,11 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     offer_rate     = signals.get("offer_acceptance_rate", -1)
     interview_rate = signals.get("interview_completion_rate", 1)
     assessment     = signals.get("skill_assessment_scores", {})
+    last_active    = signals.get("last_active_date", "")
 
     parts = []
 
-    # Skills match depth
+    # Part 1 — Skills match depth
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
         parts.append(
@@ -56,7 +52,6 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
             f"other required skills not verified"
         )
     else:
-        # Check career descriptions for actual AI work
         full_text = summary.lower()
         for j in career:
             full_text += j.get("description", "").lower()
@@ -65,13 +60,13 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
         found_terms = [t for t in ai_terms if t in full_text]
         if found_terms:
             parts.append(
-                f"no listed AI skills but career shows {found_terms[0]} "
-                f"and related work"
+                f"no listed AI skills but career work references "
+                f"{found_terms[0]} and related systems"
             )
         else:
             parts.append("no direct AI skill match found in profile")
 
-    # Assessment scores
+    # Part 2 — Assessment scores
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [s.lower() for s in JOB.get("assessment_skill_map", [])]
@@ -81,7 +76,7 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
         best_score = rel_assessments[best_skill]
         parts.append(f"verified {best_skill} assessment: {best_score}/100")
 
-    # Availability
+    # Part 3 — Availability
     if open_to_work and notice == 0:
         parts.append("immediately available")
     elif open_to_work and notice <= 30:
@@ -91,42 +86,42 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     else:
         parts.append("not marked open to work — outreach needed")
 
-    # Location
-    if country and country.lower() != "india":
-        parts.append(f"based outside India ({location}) — relocation needed")
-
-    # Response rate
+    # Part 4 — Engagement signals
     if response_rate >= 0.75:
-        parts.append(f"highly responsive ({int(response_rate*100)}%)")
+        parts.append(f"highly responsive to recruiters ({int(response_rate*100)}%)")
     elif response_rate < 0.25:
-        parts.append(f"low response rate ({int(response_rate*100)}%)")
+        parts.append(
+            f"low recruiter response rate ({int(response_rate*100)}%) "
+            f"is a hiring concern"
+        )
+    elif github >= 70:
+        parts.append(f"strong GitHub activity score ({github})")
+    elif saved >= 5:
+        parts.append(f"saved by {saved} other recruiters recently")
+    elif offer_rate >= 0.7:
+        parts.append("strong historical offer acceptance rate")
+    else:
+        parts.append(f"response rate: {int(response_rate*100)}%")
 
-    # GitHub
-    if github >= 70:
-        parts.append(f"strong GitHub activity ({github})")
-    elif github >= 40:
-        parts.append(f"moderate GitHub presence ({github})")
-
-    # Market demand
-    if saved >= 5:
-        parts.append(f"saved by {saved} other recruiters")
-
-    # Offer acceptance
-    if offer_rate >= 0.7:
-        parts.append("strong offer acceptance history")
-    elif 0 <= offer_rate < 0.3:
-        parts.append("historically declines offers")
-
-    # Education
-    if education and isinstance(education, list):
+    # Part 5 — Location and education
+    if country and country.lower() != "india":
+        parts.append(
+            f"based outside India ({location}) — "
+            f"relocation required for Pune/Noida role"
+        )
+    elif education and isinstance(education, list):
         tier = education[0].get("tier", "")
         inst = education[0].get("institution", "")
         if tier == "tier_1":
-            parts.append(f"Tier-1 education ({inst})")
+            parts.append(f"Tier-1 institution ({inst})")
+        elif notice > 60:
+            parts.append(f"notice period of {notice} days may delay joining")
+    elif notice > 60:
+        parts.append(f"notice period of {notice} days may delay joining")
 
-    # Build final reasoning
+    # Build final reasoning — now 5 parts
     opening   = f"{title_display} with {years} years of experience"
-    body      = "; ".join(parts[:3])
+    body      = "; ".join(parts[:5])
     reasoning = f"{opening}; {body}."
 
     # Honest closing concerns
@@ -152,7 +147,6 @@ def run_ranking(candidates_path, output_path):
     with jsonlines.open(candidates_path) as reader:
         for candidate in reader:
             total += 1
-
             score, raw_reasoning = score_candidate(candidate, JOB)
 
             profile  = candidate.get("profile", {})
