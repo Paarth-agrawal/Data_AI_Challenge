@@ -2,17 +2,32 @@ import csv
 import sys
 import subprocess
 import jsonlines
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from job_description import JOB
 from scorer import score_candidate, fix_title_caps
 
+# ── JOB DESCRIPTION TEXT FOR SEMANTIC MATCHING ────────────────────────
+JD_TEXT = """
+Senior AI Engineer embeddings vector database FAISS elasticsearch
+NLP information retrieval ranking sentence transformers PyTorch TensorFlow
+machine learning deep learning LLM fine-tuning RAG semantic search
+retrieval augmented generation dense retrieval hybrid search reranking
+recommendation systems ANN approximate nearest neighbour Pinecone Weaviate
+Qdrant Milvus OpenSearch production deployment evaluation NDCG MAP
+Python strong code quality product company startup scrappy shipper
+cross encoder learning to rank XGBoost neural ranking LoRA QLoRA
+PEFT fine-tuning open source contributions
+"""
+
 
 def build_reasoning(candidate, title, years, matched_skills,
-                    missing_skills, signals, score):
+                    missing_skills, signals, score, semantic_sim=0.0):
     """
-    Build specific honest reasoning with 5 points.
-    Fix issue 8: all engagement signals shown independently.
-    Fix issue 9: missing skills explicitly mentioned.
-    Fix issue 10: acronym dictionary used for titles.
+    Build strengths + concerns reasoning for each candidate.
+    Fix: all engagement signals checked independently.
+    Fix: explicit missing skills for weak candidates.
+    Fix: balanced strengths AND concerns format.
     """
     profile   = candidate.get("profile", {})
     career    = candidate.get("career_history", [])
@@ -31,44 +46,35 @@ def build_reasoning(candidate, title, years, matched_skills,
     interview_rate = signals.get("interview_completion_rate", 1)
     assessment     = signals.get("skill_assessment_scores", {})
 
-    parts = []
+    strengths = []
+    concerns  = []
 
-    # Part 1 — Skills (specific about depth AND gaps)
+    # ── STRENGTHS ─────────────────────────────────────────────────────
+
+    # Skill depth
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
-        parts.append(
-            f"strong alignment across {len(matched_skills)} required skills "
-            f"including {top}"
+        strengths.append(
+            f"strong alignment across {len(matched_skills)} required "
+            f"skills including {top}"
         )
     elif len(matched_skills) >= 3:
         top = ", ".join(matched_skills[:3])
-        parts.append(f"{top} background matches core JD requirements")
+        strengths.append(f"{top} background matches core JD requirements")
     elif len(matched_skills) >= 1:
-        parts.append(
-            f"partial skill match ({', '.join(matched_skills[:2])}); "
-            f"missing {len(missing_skills)} required skills"
+        strengths.append(
+            f"matched {len(matched_skills)} required skill(s): "
+            f"{', '.join(matched_skills[:2])}"
         )
-    else:
-        full_text = summary.lower()
-        for j in career:
-            full_text += j.get("description", "").lower()
-        ai_terms = [
-            "embedding", "retrieval", "ranking", "recommendation",
-            "nlp", "vector", "transformer", "rag", "semantic"
-        ]
-        found_terms = [t for t in ai_terms if t in full_text]
-        if found_terms:
-            parts.append(
-                f"no listed AI skills but career work references "
-                f"{found_terms[0]} and related systems"
-            )
-        else:
-            parts.append(
-                f"no direct AI skill match; missing all "
-                f"{len(missing_skills)} required JD skills"
-            )
 
-    # Part 2 — Verified assessment
+    # Semantic similarity
+    if semantic_sim >= 0.15:
+        strengths.append(
+            f"career history shows strong semantic alignment with JD "
+            f"(similarity: {round(semantic_sim, 2)})"
+        )
+
+    # Verified assessments
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [s.lower() for s in JOB.get("assessment_skill_map", [])]
@@ -76,129 +82,191 @@ def build_reasoning(candidate, title, years, matched_skills,
     if rel_assessments:
         best_skill = max(rel_assessments, key=rel_assessments.get)
         best_score = rel_assessments[best_skill]
-        parts.append(f"verified {best_skill} assessment: {best_score}/100")
-
-    # Part 3 — Availability
-    if open_to_work and notice == 0:
-        parts.append("immediately available")
-    elif open_to_work and notice <= 30:
-        parts.append(f"actively looking, {notice}-day notice")
-    elif open_to_work:
-        parts.append(f"open to work but {notice}-day notice period")
-    else:
-        parts.append("not marked open to work — outreach needed")
-
-    # Part 4 — Fix issue 8: ALL engagement signals independently checked
-    engagement_parts = []
-    if response_rate >= 0.75:
-        engagement_parts.append(
-            f"highly responsive ({int(response_rate*100)}%)"
+        strengths.append(
+            f"verified {best_skill} assessment: {best_score}/100"
         )
-    elif response_rate < 0.25:
-        engagement_parts.append(
-            f"low response rate ({int(response_rate*100)}%)"
+
+    # Availability
+    if open_to_work and notice == 0:
+        strengths.append("immediately available")
+    elif open_to_work and notice <= 30:
+        strengths.append(f"actively looking, {notice}-day notice")
+
+    # Engagement — all checked independently
+    if response_rate >= 0.75:
+        strengths.append(
+            f"highly responsive to recruiters ({int(response_rate*100)}%)"
         )
     if github >= 70:
-        engagement_parts.append(f"strong GitHub activity ({github})")
-    elif github >= 40:
-        engagement_parts.append(f"moderate GitHub presence ({github})")
+        strengths.append(f"strong GitHub activity ({github})")
     if saved >= 5:
-        engagement_parts.append(f"saved by {saved} other recruiters")
+        strengths.append(f"saved by {saved} other recruiters recently")
     if offer_rate >= 0.7:
-        engagement_parts.append("strong offer acceptance history")
-    elif 0 <= offer_rate < 0.3:
-        engagement_parts.append("historically declines offers")
+        strengths.append("strong offer acceptance history")
 
-    if engagement_parts:
-        parts.append("; ".join(engagement_parts[:2]))
-
-    # Part 5 — Location and education
-    if country and country.lower() != "india":
-        parts.append(
-            f"based outside India ({location}) — "
-            f"relocation required for Pune/Noida role"
-        )
-    elif education and isinstance(education, list):
+    # Education
+    if education and isinstance(education, list):
         tiers = [edu.get("tier", "") for edu in education]
         if "tier_1" in tiers:
             inst = next(
                 (edu.get("institution", "") for edu in education
                  if edu.get("tier") == "tier_1"), ""
             )
-            parts.append(f"Tier-1 education ({inst})")
-        elif notice > 60:
-            parts.append(
-                f"notice period of {notice} days may delay joining"
-            )
-    elif notice > 60:
-        parts.append(f"notice period of {notice} days may delay joining")
+            strengths.append(f"Tier-1 institution ({inst})")
 
-    # Build final reasoning with 5 parts
-    opening   = f"{title_display} with {years} years of experience"
-    body      = "; ".join(parts[:5])
-    reasoning = f"{opening}; {body}."
+    # Location
+    if country and country.lower() == "india":
+        strengths.append("India-based, matches role location")
 
-    # Honest closing concerns
+    # ── CONCERNS ──────────────────────────────────────────────────────
+
+    # Missing skills
+    if len(missing_skills) >= 8:
+        concerns.append(f"missing {len(missing_skills)} of 14 required JD skills")
+    elif len(matched_skills) == 0:
+        full_text = summary.lower()
+        for j in career:
+            full_text += j.get("description", "").lower()
+        ai_terms = ["embedding", "retrieval", "ranking", "nlp", "vector"]
+        found = [t for t in ai_terms if t in full_text]
+        if not found:
+            concerns.append("no direct AI skill evidence in profile or career")
+
+    # Availability concerns
+    if not open_to_work:
+        concerns.append("not marked open to work — outreach needed")
+    elif notice > 90:
+        concerns.append(f"long notice period ({notice} days)")
+
+    # Engagement concerns
+    if response_rate < 0.25:
+        concerns.append(
+            f"low recruiter response rate ({int(response_rate*100)}%)"
+        )
+    if interview_rate < 0.4:
+        concerns.append("low interview completion rate")
+    if 0 <= offer_rate < 0.3:
+        concerns.append("historically declines offers")
+
+    # Experience concerns
     if years > 12:
-        reasoning += f" Seniority ({years} yrs) may be above role level."
-    elif score < 30:
-        reasoning += " Profile is below ideal fit threshold."
-    elif interview_rate < 0.4:
-        reasoning += " Low interview completion rate is a hiring risk."
+        concerns.append(f"may be overqualified ({years} yrs)")
 
-    return reasoning
+    # Location concern
+    if country and country.lower() != "india":
+        concerns.append(
+            f"based outside India ({location}) — relocation required"
+        )
+
+    # ── BUILD FINAL REASONING ─────────────────────────────────────────
+    opening = f"{title_display} with {years} years of experience"
+
+    if strengths and concerns:
+        body = (
+            f"Strengths: {'; '.join(strengths[:3])}. "
+            f"Concerns: {'; '.join(concerns[:2])}."
+        )
+    elif strengths:
+        body = f"{'; '.join(strengths[:4])}."
+    else:
+        body = f"Profile below threshold — concerns: {'; '.join(concerns[:3])}."
+
+    return f"{opening}. {body}"
 
 
 def run_ranking(candidates_path, output_path):
     print(f"Loading and scoring candidates from {candidates_path}...")
     print("Please wait — this takes 2-4 minutes...\n")
 
-    results               = []
-    disqualified          = 0
-    total                 = 0
-    required_skills_lower = [s.lower() for s in JOB.get("required_skills", [])]
+    # ── STEP 1: Build TF-IDF semantic model from all candidate texts ──
+    print("Building semantic similarity model...")
+    all_candidate_texts = []
+    all_candidates      = []
 
     with jsonlines.open(candidates_path) as reader:
         for candidate in reader:
-            total += 1
-            score, raw_reasoning = score_candidate(candidate, JOB)
-
-            profile  = candidate.get("profile", {})
-            signals  = candidate.get("redrob_signals", {})
-            skills   = candidate.get("skills", [])
-            title    = profile.get("current_title", "")
-            years    = profile.get("years_of_experience", 0)
-
-            candidate_skills_lower = [s["name"].lower() for s in skills]
-            matched_skills = [
-                s for s in required_skills_lower
-                if s in candidate_skills_lower
-            ]
-            missing_skills = [
-                s for s in required_skills_lower
-                if s not in candidate_skills_lower
-            ]
-
-            if score == 0:
-                disqualified += 1
-
-            reasoning = build_reasoning(
-                candidate, title, years,
-                matched_skills, missing_skills, signals, score
+            profile = candidate.get("profile", {})
+            career  = candidate.get("career_history", [])
+            summary = profile.get("summary", "").lower()
+            headline = profile.get("headline", "").lower()
+            skills_text = " ".join(
+                s["name"].lower() for s in candidate.get("skills", [])
             )
+            desc_text = " ".join(
+                j.get("description", "").lower() for j in career
+            )
+            candidate_text = (
+                summary + " " + headline + " " +
+                skills_text + " " + desc_text
+            )
+            all_candidate_texts.append(candidate_text)
+            all_candidates.append(candidate)
 
-            results.append({
-                "candidate_id": candidate["candidate_id"],
-                "name":         profile.get("anonymized_name", ""),
-                "title":        title,
-                "years":        years,
-                "score":        score,
-                "reasoning":    reasoning
-            })
+    total = len(all_candidates)
 
-            if total % 10000 == 0:
-                print(f"  Processed {total:,} candidates...")
+    # Fit TF-IDF on JD + all candidates
+    print(f"  Loaded {total:,} candidates. Computing semantic scores...")
+    vectorizer = TfidfVectorizer(max_features=8000, ngram_range=(1, 2))
+    all_texts  = [JD_TEXT.lower()] + all_candidate_texts
+    tfidf_matrix = vectorizer.fit_transform(all_texts)
+    jd_vector    = tfidf_matrix[0]
+    candidate_vectors = tfidf_matrix[1:]
+    semantic_scores = cosine_similarity(jd_vector, candidate_vectors)[0]
+    print("  Semantic model ready!")
 
+    # ── STEP 2: Score all candidates ──────────────────────────────────
+    print("  Scoring all candidates...\n")
+    results      = []
+    disqualified = 0
+
+    required_skills_lower = [s.lower() for s in JOB.get("required_skills", [])]
+
+    for i, candidate in enumerate(all_candidates):
+        score, raw_reasoning = score_candidate(
+            candidate, JOB,
+            jd_tfidf_vector=jd_vector,
+            tfidf_vectorizer=vectorizer
+        )
+
+        profile  = candidate.get("profile", {})
+        signals  = candidate.get("redrob_signals", {})
+        skills   = candidate.get("skills", [])
+        title    = profile.get("current_title", "")
+        years    = profile.get("years_of_experience", 0)
+
+        candidate_skills_lower = [s["name"].lower() for s in skills]
+        matched_skills = [
+            s for s in required_skills_lower
+            if s in candidate_skills_lower
+        ]
+        missing_skills = [
+            s for s in required_skills_lower
+            if s not in candidate_skills_lower
+        ]
+
+        if score == 0:
+            disqualified += 1
+
+        reasoning = build_reasoning(
+            candidate, title, years,
+            matched_skills, missing_skills,
+            signals, score,
+            semantic_sim=float(semantic_scores[i])
+        )
+
+        results.append({
+            "candidate_id": candidate["candidate_id"],
+            "name":         profile.get("anonymized_name", ""),
+            "title":        title,
+            "years":        years,
+            "score":        score,
+            "reasoning":    reasoning
+        })
+
+        if (i + 1) % 10000 == 0:
+            print(f"  Processed {i+1:,} candidates...")
+
+    # ── STEP 3: Sort + normalize ───────────────────────────────────────
     print("\nSorting results...")
     results.sort(key=lambda x: (-x["score"], x["candidate_id"]))
 
@@ -228,6 +296,7 @@ def run_ranking(candidates_path, output_path):
         print(f"     Reasoning: {r['reasoning']}")
         print()
 
+    # ── STEP 4: Save CSV ──────────────────────────────────────────────
     print(f"Saving {output_path}...")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
