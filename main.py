@@ -3,10 +3,17 @@ import sys
 import subprocess
 import jsonlines
 from job_description import JOB
-from scorer import score_candidate
+from scorer import score_candidate, fix_title_caps
 
 
-def build_reasoning(candidate, title, years, matched_skills, signals, score):
+def build_reasoning(candidate, title, years, matched_skills,
+                    missing_skills, signals, score):
+    """
+    Build specific honest reasoning with 5 points.
+    Fix issue 8: all engagement signals shown independently.
+    Fix issue 9: missing skills explicitly mentioned.
+    Fix issue 10: acronym dictionary used for titles.
+    """
     profile   = candidate.get("profile", {})
     career    = candidate.get("career_history", [])
     education = candidate.get("education", [])
@@ -14,16 +21,7 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     location  = profile.get("location", "")
     country   = profile.get("country", "")
 
-    # Fix capitalisation
-    title_display = title.title()
-    for old, new in [
-        (" Ai", " AI"), ("Ai ", "AI "), ("(Ai)", "(AI)"),
-        (" Ml", " ML"), ("Ml ", "ML "), ("(Ml)", "(ML)"),
-        ("Nlp", "NLP"), ("Llm", "LLM"), ("Faiss", "FAISS"),
-        ("Rag", "RAG"), ("Api", "API"), ("Sql", "SQL")
-    ]:
-        title_display = title_display.replace(old, new)
-
+    title_display  = fix_title_caps(title)
     open_to_work   = signals.get("open_to_work_flag", False)
     notice         = signals.get("notice_period_days", 90)
     response_rate  = signals.get("recruiter_response_rate", 0)
@@ -32,11 +30,10 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     offer_rate     = signals.get("offer_acceptance_rate", -1)
     interview_rate = signals.get("interview_completion_rate", 1)
     assessment     = signals.get("skill_assessment_scores", {})
-    last_active    = signals.get("last_active_date", "")
 
     parts = []
 
-    # Part 1 — Skills match depth
+    # Part 1 — Skills (specific about depth AND gaps)
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
         parts.append(
@@ -49,14 +46,16 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     elif len(matched_skills) >= 1:
         parts.append(
             f"partial skill match ({', '.join(matched_skills[:2])}); "
-            f"other required skills not verified"
+            f"missing {len(missing_skills)} required skills"
         )
     else:
         full_text = summary.lower()
         for j in career:
             full_text += j.get("description", "").lower()
-        ai_terms = ["embedding", "retrieval", "ranking", "recommendation",
-                    "nlp", "vector", "transformer", "rag", "semantic"]
+        ai_terms = [
+            "embedding", "retrieval", "ranking", "recommendation",
+            "nlp", "vector", "transformer", "rag", "semantic"
+        ]
         found_terms = [t for t in ai_terms if t in full_text]
         if found_terms:
             parts.append(
@@ -64,9 +63,12 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
                 f"{found_terms[0]} and related systems"
             )
         else:
-            parts.append("no direct AI skill match found in profile")
+            parts.append(
+                f"no direct AI skill match; missing all "
+                f"{len(missing_skills)} required JD skills"
+            )
 
-    # Part 2 — Assessment scores
+    # Part 2 — Verified assessment
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [s.lower() for s in JOB.get("assessment_skill_map", [])]
@@ -86,22 +88,29 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     else:
         parts.append("not marked open to work — outreach needed")
 
-    # Part 4 — Engagement signals
+    # Part 4 — Fix issue 8: ALL engagement signals independently checked
+    engagement_parts = []
     if response_rate >= 0.75:
-        parts.append(f"highly responsive to recruiters ({int(response_rate*100)}%)")
-    elif response_rate < 0.25:
-        parts.append(
-            f"low recruiter response rate ({int(response_rate*100)}%) "
-            f"is a hiring concern"
+        engagement_parts.append(
+            f"highly responsive ({int(response_rate*100)}%)"
         )
-    elif github >= 70:
-        parts.append(f"strong GitHub activity score ({github})")
-    elif saved >= 5:
-        parts.append(f"saved by {saved} other recruiters recently")
-    elif offer_rate >= 0.7:
-        parts.append("strong historical offer acceptance rate")
-    else:
-        parts.append(f"response rate: {int(response_rate*100)}%")
+    elif response_rate < 0.25:
+        engagement_parts.append(
+            f"low response rate ({int(response_rate*100)}%)"
+        )
+    if github >= 70:
+        engagement_parts.append(f"strong GitHub activity ({github})")
+    elif github >= 40:
+        engagement_parts.append(f"moderate GitHub presence ({github})")
+    if saved >= 5:
+        engagement_parts.append(f"saved by {saved} other recruiters")
+    if offer_rate >= 0.7:
+        engagement_parts.append("strong offer acceptance history")
+    elif 0 <= offer_rate < 0.3:
+        engagement_parts.append("historically declines offers")
+
+    if engagement_parts:
+        parts.append("; ".join(engagement_parts[:2]))
 
     # Part 5 — Location and education
     if country and country.lower() != "india":
@@ -110,16 +119,21 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
             f"relocation required for Pune/Noida role"
         )
     elif education and isinstance(education, list):
-        tier = education[0].get("tier", "")
-        inst = education[0].get("institution", "")
-        if tier == "tier_1":
-            parts.append(f"Tier-1 institution ({inst})")
+        tiers = [edu.get("tier", "") for edu in education]
+        if "tier_1" in tiers:
+            inst = next(
+                (edu.get("institution", "") for edu in education
+                 if edu.get("tier") == "tier_1"), ""
+            )
+            parts.append(f"Tier-1 education ({inst})")
         elif notice > 60:
-            parts.append(f"notice period of {notice} days may delay joining")
+            parts.append(
+                f"notice period of {notice} days may delay joining"
+            )
     elif notice > 60:
         parts.append(f"notice period of {notice} days may delay joining")
 
-    # Build final reasoning — now 5 parts
+    # Build final reasoning with 5 parts
     opening   = f"{title_display} with {years} years of experience"
     body      = "; ".join(parts[:5])
     reasoning = f"{opening}; {body}."
@@ -128,7 +142,7 @@ def build_reasoning(candidate, title, years, matched_skills, signals, score):
     if years > 12:
         reasoning += f" Seniority ({years} yrs) may be above role level."
     elif score < 30:
-        reasoning += " Profile is below ideal fit threshold for this role."
+        reasoning += " Profile is below ideal fit threshold."
     elif interview_rate < 0.4:
         reasoning += " Low interview completion rate is a hiring risk."
 
@@ -160,12 +174,17 @@ def run_ranking(candidates_path, output_path):
                 s for s in required_skills_lower
                 if s in candidate_skills_lower
             ]
+            missing_skills = [
+                s for s in required_skills_lower
+                if s not in candidate_skills_lower
+            ]
 
             if score == 0:
                 disqualified += 1
 
             reasoning = build_reasoning(
-                candidate, title, years, matched_skills, signals, score
+                candidate, title, years,
+                matched_skills, missing_skills, signals, score
             )
 
             results.append({

@@ -1,51 +1,79 @@
 from datetime import datetime, timezone
 
 
+# ── ACRONYM DICTIONARY (fixes issue 10) ──────────────────────────────
+ACRONYMS = {
+    "ai": "AI", "ml": "ML", "nlp": "NLP", "llm": "LLM",
+    "rag": "RAG", "api": "API", "sql": "SQL", "faiss": "FAISS",
+    "mlops": "MLOps", "llmops": "LLMOps", "rlhf": "RLHF",
+    "cuda": "CUDA", "bert": "BERT", "gpt": "GPT", "cv": "CV"
+}
+
+
+def fix_title_caps(title):
+    """Fix capitalisation using acronym dictionary."""
+    title_display = title.title()
+    for word, replacement in ACRONYMS.items():
+        title_display = title_display.replace(word.title(), replacement)
+        title_display = title_display.replace(f"({word.title()})", f"({replacement})")
+    return title_display
+
+
 def detect_honeypot(candidate):
     """
-    Detect impossible/fake profiles. Be conservative —
-    better to miss a honeypot than disqualify a real candidate.
+    Detect impossible profiles. Conservative — better to miss
+    a honeypot than disqualify a real candidate.
     """
     profile      = candidate.get("profile", {})
     career       = candidate.get("career_history", [])
+    education    = candidate.get("education", [])
     current_year = datetime.now().year
     years_exp    = profile.get("years_of_experience", 0)
-    grad_year    = 0
 
-    education = candidate.get("education", [])
+    # Fix issue 6 — use max graduation year, not first entry
+    grad_year = 0
     if education and isinstance(education, list):
-        grad_year = education[0].get("end_year", 0)
+        grad_year = max(
+            (edu.get("end_year", 0) or 0) for edu in education
+        )
 
+    # Graduation year in the future
     if grad_year and grad_year > current_year:
         return True, f"Honeypot: graduation year {grad_year} is in the future"
 
+    # Experience impossible given graduation year
     if grad_year and grad_year > 0:
         max_possible = current_year - grad_year
         if years_exp > max_possible + 2:
-            return True, f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
+            return True, (
+                f"Honeypot: {years_exp} yrs exp but graduated {grad_year}"
+            )
 
+    # Worked at company before it was founded
     for job in career:
         founded    = job.get("company_founded_year", 0)
         start_year = job.get("start_year", 0)
         if founded and start_year and start_year < founded - 1:
             return True, "Honeypot: worked at company before it was founded"
 
+    # Fix issue 7 — increase tolerance to 48 months for freelancing/parallel work
     if career:
         total_months   = sum(j.get("duration_months", 0) for j in career)
         claimed_months = years_exp * 12
-        if total_months > claimed_months + 36:
+        if total_months > claimed_months + 48:
             return True, (
                 f"Honeypot: career history ({total_months}mo) "
                 f"far exceeds claimed exp ({claimed_months}mo)"
             )
 
+    # Fix issue 5 — only flag 20+ experts if experience < 8 years
     skills = candidate.get("skills", [])
     expert_count = sum(
         1 for s in skills
         if str(s.get("proficiency", "")).lower() in ["expert", "advanced"]
     )
-    if expert_count >= 20:
-        return True, "Honeypot: expert/advanced in 20+ skills simultaneously"
+    if expert_count >= 20 and years_exp < 8:
+        return True, "Honeypot: expert in 20+ skills with under 8 years experience"
 
     return False, ""
 
@@ -69,7 +97,6 @@ def score_candidate(candidate, job):
     location         = profile.get("location", "").lower()
     country          = profile.get("country", "").lower()
 
-    # Build full text for keyword search
     full_text = summary + " " + headline + " "
     for j in career:
         full_text += j.get("description", "").lower() + " "
@@ -81,23 +108,36 @@ def score_candidate(candidate, job):
 
     # ── INSTANT DISQUALIFIERS ─────────────────────────────────────────
 
+    # 1. Completely unrelated job function
     for bad in job.get("avoid_titles", []):
         if bad.lower() in current_title:
             return 0.0, f"Disqualified: unrelated role ({current_title})"
 
-    all_companies = [j.get("company", "").lower() for j in career]
-    if all_companies and all(
-        any(firm in company for firm in consulting_firms)
-        for company in all_companies
-    ):
-        return 0.0, "Disqualified: entire career at consulting firms"
-
+    # 2. Less than 2 years experience
     if years_experience < 2:
         return 0.0, f"Disqualified: too junior ({years_experience} yrs)"
 
+    # 3. Junior title
     for flag in job.get("junior_title_flags", []):
         if flag in current_title:
             return 0.0, f"Disqualified: junior role ({current_title})"
+
+    # ── FIX ISSUE 2: Consulting firms now penalised not disqualified ──
+    all_companies = [j.get("company", "").lower() for j in career]
+    consulting_jobs = sum(
+        1 for company in all_companies
+        if any(firm in company for firm in consulting_firms)
+    )
+    total_jobs = len(all_companies) if all_companies else 1
+    consulting_ratio = consulting_jobs / total_jobs
+
+    if consulting_ratio == 1.0:
+        # Entire career consulting — heavy penalty but not zero
+        score -= 15
+        reasons.append("Entire career at consulting firms")
+    elif consulting_ratio >= 0.5:
+        score -= 7
+        reasons.append("Primarily consulting background")
 
     # ══════════════════════════════════════════════════════════════════
     # SECTION 1 — SKILL MATCH (35 points max)
@@ -105,6 +145,7 @@ def score_candidate(candidate, job):
 
     required_skills = [s.lower() for s in job.get("required_skills", [])]
     matched         = [s for s in required_skills if s in candidate_skills]
+    missing         = [s for s in required_skills if s not in candidate_skills]
     skill_score     = (len(matched) / len(required_skills)) * 35
     score          += skill_score
 
@@ -113,9 +154,13 @@ def score_candidate(candidate, job):
         reasons.append("No required skills matched")
     elif len(matched) == 1:
         score -= 5
-        reasons.append(f"Only 1 skill: {matched[0]}")
+        reasons.append(f"Only 1 skill matched: {matched[0]}")
     else:
         reasons.append(f"Skills: {', '.join(matched[:5])}")
+
+    # Fix issue 9 — explicitly mention missing skills for weak candidates
+    if len(missing) >= 8:
+        reasons.append(f"Missing {len(missing)} required JD skills")
 
     # Bonus skills (5 points max)
     bonus_skills  = [s.lower() for s in job.get("bonus_skills", [])]
@@ -136,12 +181,9 @@ def score_candidate(candidate, job):
         avg_assessment   = sum(relevant_scores) / len(relevant_scores)
         assessment_bonus = (avg_assessment / 100) * 5
         score           += assessment_bonus
-        reasons.append(
-            f"Assessment avg: {round(avg_assessment, 1)}/100"
-        )
+        reasons.append(f"Assessment avg: {round(avg_assessment, 1)}/100")
 
     # Career description keyword bonus (5 points max)
-    # The JD says read what people ACTUALLY DID not just their title
     ai_keywords = [
         "embedding", "vector", "retrieval", "ranking", "recommendation",
         "nlp", "transformer", "fine-tun", "rag", "semantic search",
@@ -153,9 +195,9 @@ def score_candidate(candidate, job):
     desc_bonus = min(5, keyword_hits * 0.5)
     score += desc_bonus
     if keyword_hits >= 4:
-        reasons.append(f"Strong AI work in career history")
+        reasons.append("Strong AI work in career descriptions")
     elif keyword_hits >= 2:
-        reasons.append(f"Some AI work in career history")
+        reasons.append("Some AI work in career descriptions")
 
     # ══════════════════════════════════════════════════════════════════
     # SECTION 2 — EXPERIENCE (15 points max)
@@ -178,7 +220,7 @@ def score_candidate(candidate, job):
     score += exp_score
 
     if "Overqualified" not in " ".join(reasons):
-        reasons.append(f"{years_experience} yrs exp")
+        reasons.append(f"{years_experience} yrs experience")
 
     # ══════════════════════════════════════════════════════════════════
     # SECTION 3 — JOB TITLE (15 points max)
@@ -199,26 +241,19 @@ def score_candidate(candidate, job):
     # SECTION 4 — CAREER QUALITY (10 points max)
     # ══════════════════════════════════════════════════════════════════
 
-    product_roles    = 0
-    it_services_only = True
-
+    product_roles = 0
     for job_entry in career:
-        company       = job_entry.get("company", "").lower()
-        title         = job_entry.get("title", "").lower()
-        industry      = job_entry.get("industry", "").lower()
-        company_size  = job_entry.get("company_size", "")
+        company      = job_entry.get("company", "").lower()
+        title        = job_entry.get("title", "").lower()
+        industry     = job_entry.get("industry", "").lower()
         is_consulting = any(firm in company for firm in consulting_firms)
         is_it_services = "it service" in industry or "outsourc" in industry
         is_tech_role  = any(
             t in title for t in
             ["engineer", "scientist", "developer", "researcher", "architect"]
         )
-
         if not is_consulting and not is_it_services and is_tech_role:
             product_roles += 1
-            it_services_only = False
-        elif not is_consulting and not is_it_services:
-            it_services_only = False
 
     if product_roles >= 3:
         score += 10
@@ -228,29 +263,31 @@ def score_candidate(candidate, job):
         reasons.append("Some product company experience")
 
     # Education tier bonus (3 points max)
-    # JD values strong technical backgrounds
     if education and isinstance(education, list):
-        tier = education[0].get("tier", "")
-        if tier == "tier_1":
+        # Use best tier across all education entries
+        tiers = [edu.get("tier", "") for edu in education]
+        if "tier_1" in tiers:
             score += 3
-            reasons.append("Tier-1 institution")
-        elif tier == "tier_2":
+            inst = next(
+                (edu.get("institution", "") for edu in education
+                 if edu.get("tier") == "tier_1"), ""
+            )
+            reasons.append(f"Tier-1 institution ({inst})")
+        elif "tier_2" in tiers:
             score += 1
 
     # ══════════════════════════════════════════════════════════════════
-    # SECTION 5 — LOCATION (3 points max)
-    # JD: Pune/Noida preferred; Delhi NCR, Hyderabad, Mumbai welcome
-    # Outside India: case-by-case but no visa sponsorship
+    # SECTION 5 — LOCATION (fix issue 11: bonus only, no penalty)
     # ══════════════════════════════════════════════════════════════════
 
-    preferred_cities = ["pune", "noida", "delhi", "hyderabad", "mumbai",
-                        "bangalore", "bengaluru", "chennai", "gurugram", "gurgaon"]
+    preferred_cities = [
+        "pune", "noida", "delhi", "hyderabad", "mumbai",
+        "bangalore", "bengaluru", "chennai", "gurugram", "gurgaon"
+    ]
     if country == "india" or any(city in location for city in preferred_cities):
         score += 3
         reasons.append("India-based")
-    elif country and country != "india":
-        score -= 2
-        reasons.append(f"Outside India ({profile.get('country', '')})")
+    # No penalty for being outside India — just no bonus
 
     # ══════════════════════════════════════════════════════════════════
     # SECTION 6 — ALL 23 BEHAVIORAL SIGNALS (20 points max)
@@ -342,7 +379,7 @@ def score_candidate(candidate, job):
     elif avg_response >= 120:
         signal_score -= 1
 
-    # Signal 9: skill_assessment_scores — handled above
+    # Signal 9: skill_assessment_scores — handled in Section 1
 
     # Signal 10: connection_count
     connections = signals.get("connection_count", 0)
