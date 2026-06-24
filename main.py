@@ -3,64 +3,85 @@ import sys
 import time
 import subprocess
 import jsonlines
+from typing import Dict, List, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from job_description import JOB
-from scorer import score_candidate, fix_title_caps, WEIGHTS
+from scorer import (
+    score_candidate, fix_title_caps, WEIGHTS,
+    deduplicate_text
+)
 
 JD_TEXT = """
-Senior AI Engineer embeddings vector database FAISS elasticsearch
-NLP information retrieval ranking sentence transformers PyTorch TensorFlow
-machine learning deep learning LLM fine-tuning RAG semantic search
+senior ai engineer embeddings vector database faiss elasticsearch
+nlp information retrieval ranking sentence transformers pytorch tensorflow
+machine learning deep learning llm fine-tuning rag semantic search
 retrieval augmented generation dense retrieval hybrid search reranking
-recommendation systems ANN approximate nearest neighbour Pinecone Weaviate
-Qdrant Milvus OpenSearch production deployment evaluation NDCG MAP
-Python strong code quality product company startup scrappy shipper
-cross encoder learning to rank XGBoost neural ranking LoRA QLoRA
-PEFT fine-tuning open source contributions BM25 hybrid retrieval
+recommendation systems ann approximate nearest neighbour pinecone weaviate
+qdrant milvus opensearch production deployment evaluation ndcg map
+python code quality product company startup cross encoder learning to rank
+xgboost neural ranking lora qlora peft bm25 hybrid retrieval
+dense sparse fusion transformer architecture
 """
 
 
-def get_confidence(candidate, matched_skills, score):
+def get_confidence(
+    matched_skills: List,
+    semantic_sim: float,
+    signals: Dict
+) -> str:
     """
-    Compute confidence level based on evidence completeness.
-    High = strong skill evidence + complete profile + verified assessments
-    Medium = partial evidence
-    Low = thin profile or weak signals
+    Confidence requires strong skill evidence AND semantic alignment.
+    Fix: High confidence now requires matched_skills >= 4.
     """
-    signals      = candidate.get("redrob_signals", {})
     completeness = signals.get("profile_completeness_score", 0)
     assessments  = signals.get("skill_assessment_scores", {})
-    career       = candidate.get("career_history", [])
+    career_len   = 0  # will be passed separately if needed
 
-    evidence_score = 0
-    if len(matched_skills) >= 4:
-        evidence_score += 3
+    evidence = 0
+
+    # Skills evidence — requires at least 4 for High
+    if len(matched_skills) >= 6:
+        evidence += 3
+    elif len(matched_skills) >= 4:
+        evidence += 2
     elif len(matched_skills) >= 2:
-        evidence_score += 1
+        evidence += 1
 
+    # Semantic evidence
+    if semantic_sim >= 0.15:
+        evidence += 2
+    elif semantic_sim >= 0.08:
+        evidence += 1
+
+    # Profile completeness
     if completeness >= 75:
-        evidence_score += 2
+        evidence += 2
     elif completeness >= 50:
-        evidence_score += 1
+        evidence += 1
 
+    # Verified assessments
     if assessments:
-        evidence_score += 2
+        evidence += 1
 
-    if len(career) >= 2:
-        evidence_score += 1
-
-    if evidence_score >= 6:
+    if evidence >= 7:
         return "High"
-    elif evidence_score >= 3:
+    elif evidence >= 4:
         return "Medium"
     else:
         return "Low"
 
 
-def build_reasoning(candidate, title, years, matched_skills,
-                    missing_skills, signals, score,
-                    semantic_sim=0.0):
+def build_reasoning(
+    candidate: Dict,
+    title: str,
+    years: float,
+    matched_skills: List,
+    missing_skills: List,
+    signals: Dict,
+    score: float,
+    semantic_sim: float = 0.0
+) -> str:
     profile   = candidate.get("profile", {})
     career    = candidate.get("career_history", [])
     education = candidate.get("education", [])
@@ -81,7 +102,7 @@ def build_reasoning(candidate, title, years, matched_skills,
     strengths = []
     concerns  = []
 
-    # Strengths
+    # Skill strengths
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
         strengths.append(
@@ -100,10 +121,9 @@ def build_reasoning(candidate, title, years, matched_skills,
         )
 
     if semantic_sim >= 0.15:
-        strengths.append(
-            f"career history shows strong semantic alignment with JD"
-        )
+        strengths.append("career history shows strong semantic JD alignment")
 
+    # Verified assessment
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [
@@ -116,16 +136,15 @@ def build_reasoning(candidate, title, years, matched_skills,
             f"verified {best} assessment: {rel_assessments[best]}/100"
         )
 
+    # Availability
     if open_to_work and notice == 0:
         strengths.append("immediately available")
     elif open_to_work and notice <= 30:
         strengths.append(f"actively looking, {notice}-day notice")
 
-    # All engagement independently
+    # Engagement — all checked independently
     if response_rate >= 0.75:
-        strengths.append(
-            f"highly responsive ({int(response_rate*100)}%)"
-        )
+        strengths.append(f"highly responsive ({int(response_rate*100)}%)")
     if github >= 70:
         strengths.append(f"strong GitHub activity ({github})")
     if saved >= 5:
@@ -133,6 +152,7 @@ def build_reasoning(candidate, title, years, matched_skills,
     if offer_rate >= 0.7:
         strengths.append("strong offer acceptance history")
 
+    # Education
     if education and isinstance(education, list):
         tiers = [edu.get("tier", "") for edu in education]
         if "tier_1" in tiers:
@@ -142,14 +162,13 @@ def build_reasoning(candidate, title, years, matched_skills,
             )
             strengths.append(f"Tier-1 education ({inst})")
 
+    # Location
     if country and country.lower() == "india":
-        strengths.append("India-based, matches role location")
+        strengths.append("location aligns with hiring preference")
 
     # Concerns
     if len(missing_skills) >= 8:
-        concerns.append(
-            f"missing {len(missing_skills)} of 14 required JD skills"
-        )
+        concerns.append(f"missing {len(missing_skills)} of 14 required JD skills")
     elif len(matched_skills) == 0:
         concerns.append("no direct AI skill evidence found")
 
@@ -159,9 +178,7 @@ def build_reasoning(candidate, title, years, matched_skills,
         concerns.append(f"long notice period ({notice} days)")
 
     if response_rate < 0.25:
-        concerns.append(
-            f"low recruiter response rate ({int(response_rate*100)}%)"
-        )
+        concerns.append(f"low response rate ({int(response_rate*100)}%)")
     if interview_rate < 0.4:
         concerns.append("low interview completion rate")
     if 0 <= offer_rate < 0.3:
@@ -183,20 +200,16 @@ def build_reasoning(candidate, title, years, matched_skills,
     elif strengths:
         body = f"{'; '.join(strengths[:4])}."
     else:
-        body = (
-            f"Profile below threshold — "
-            f"concerns: {'; '.join(concerns[:3])}."
-        )
+        body = f"Profile below threshold — concerns: {'; '.join(concerns[:3])}."
 
     return f"{opening}. {body}"
 
 
-def run_ranking(candidates_path, output_path):
+def run_ranking(candidates_path: str, output_path: str) -> None:
     start_time = time.time()
     print(f"Loading candidates from {candidates_path}...")
-    print("Please wait — this takes 2-4 minutes...\n")
+    print("Please wait — approximately 4 minutes on CPU...\n")
 
-    # Load all candidates first for TF-IDF
     all_candidates      = []
     all_candidate_texts = []
 
@@ -204,34 +217,29 @@ def run_ranking(candidates_path, output_path):
         for candidate in reader:
             profile  = candidate.get("profile", {})
             career   = candidate.get("career_history", [])
-            summary  = profile.get("summary", "").lower()
-            headline = profile.get("headline", "").lower()
-            skills_text = " ".join(
-                s["name"].lower() for s in candidate.get("skills", [])
+            raw_text = (
+                profile.get("summary", "").lower() + " " +
+                profile.get("headline", "").lower() + " " +
+                " ".join(s["name"].lower()
+                          for s in candidate.get("skills", [])) + " " +
+                " ".join(j.get("description", "").lower() for j in career)
             )
-            desc_text = " ".join(
-                j.get("description", "").lower() for j in career
-            )
-            all_candidate_texts.append(
-                summary + " " + headline + " " + skills_text + " " + desc_text
-            )
+            all_candidate_texts.append(deduplicate_text(raw_text))
             all_candidates.append(candidate)
 
     total = len(all_candidates)
     print(f"Loaded {total:,} candidates.")
 
-    # Build TF-IDF semantic model
     print("Building TF-IDF semantic model...")
     vectorizer   = TfidfVectorizer(max_features=8000, ngram_range=(1, 2))
-    all_texts    = [JD_TEXT.lower()] + all_candidate_texts
+    all_texts    = [deduplicate_text(JD_TEXT)] + all_candidate_texts
     tfidf_matrix = vectorizer.fit_transform(all_texts)
     jd_vector    = tfidf_matrix[0]
     cand_vectors = tfidf_matrix[1:]
     semantic_scores = cosine_similarity(jd_vector, cand_vectors)[0]
     print("Semantic model ready.\n")
 
-    # Score all candidates
-    print("Scoring all candidates...")
+    print("Scoring candidates...")
     results               = []
     disqualified          = 0
     required_skills_lower = [s.lower() for s in JOB.get("required_skills", [])]
@@ -260,12 +268,12 @@ def run_ranking(candidates_path, output_path):
         if score == 0:
             disqualified += 1
 
-        confidence = get_confidence(candidate, matched_skills, score)
+        sem_sim    = float(semantic_scores[i])
+        confidence = get_confidence(matched_skills, sem_sim, signals)
         reasoning  = build_reasoning(
             candidate, title, years,
             matched_skills, missing_skills,
-            signals, score,
-            semantic_sim=float(semantic_scores[i])
+            signals, score, sem_sim
         )
 
         results.append({
@@ -281,7 +289,6 @@ def run_ranking(candidates_path, output_path):
         if (i + 1) % 10000 == 0:
             print(f"  Processed {i+1:,} candidates...")
 
-    # Sort and normalize
     print("\nSorting results...")
     results.sort(key=lambda x: (-x["score"], x["candidate_id"]))
 
@@ -300,11 +307,7 @@ def run_ranking(candidates_path, output_path):
     print(f"\nTotal        : {total:,}")
     print(f"Qualified    : {qualified:,}")
     print(f"Disqualified : {disqualified:,}")
-    print(f"Runtime      : {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
-    print(
-        f"Top score    : {results[0]['score']} "
-        f"→ normalized: {results[0]['normalized_score']}"
-    )
+    print(f"Runtime      : {elapsed:.1f}s ({elapsed/60:.1f} min)")
 
     print("\n========== TOP 10 CANDIDATES ==========\n")
     for i, r in enumerate(results[:10], 1):
@@ -314,7 +317,6 @@ def run_ranking(candidates_path, output_path):
         print(f"     Reasoning: {r['reasoning']}")
         print()
 
-    # Save CSV
     print(f"Saving {output_path}...")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -328,7 +330,6 @@ def run_ranking(candidates_path, output_path):
             ])
     print(f"{output_path} saved!")
 
-    # Validate
     print("\nValidating format...")
     result = subprocess.run(
         ["python", "validate_submission.py", output_path],
