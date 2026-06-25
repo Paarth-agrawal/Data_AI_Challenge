@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 ACRONYMS = {
     "ai": "AI", "ml": "ML", "nlp": "NLP", "llm": "LLM",
@@ -9,7 +9,7 @@ ACRONYMS = {
     "gpu": "GPU", "cpu": "CPU", "aws": "AWS", "gcp": "GCP",
 }
 
-SKILL_ALIASES = {
+SKILL_ALIASES: Dict[str, List[str]] = {
     "faiss":                ["ann", "approximate nearest neighbour",
                              "vector retrieval", "approximate nearest neighbor",
                              "hnsw", "ivf index"],
@@ -35,7 +35,7 @@ SKILL_ALIASES = {
                              "gradient boosting", "xgboost", "lightgbm"],
 }
 
-WEIGHTS = {
+WEIGHTS: Dict[str, int] = {
     "skills":     35,
     "assessment":  5,
     "bonus":       5,
@@ -45,7 +45,7 @@ WEIGHTS = {
     "career":     10,
     "signals":    20,
     "location":    2,
-    "education":   1,   # Reduced to 1 — tiebreaker only
+    "education":   1,
 }
 
 
@@ -60,17 +60,13 @@ def fix_title_caps(title: str) -> str:
 
 
 def deduplicate_text(text: str) -> str:
-    """
-    Prevent TF-IDF exploitation by deduplicating repeated tokens.
-    A word appearing 10 times is treated the same as appearing 3 times.
-    """
-    words   = text.split()
-    counts  = {}
-    result  = []
-    max_rep = 3  # Allow at most 3 repetitions of any word
+    """Prevent TF-IDF exploitation — cap any word at 3 occurrences."""
+    words  = text.split()
+    counts: Dict[str, int] = {}
+    result = []
     for word in words:
         counts[word] = counts.get(word, 0) + 1
-        if counts[word] <= max_rep:
+        if counts[word] <= 3:
             result.append(word)
     return " ".join(result)
 
@@ -112,7 +108,6 @@ def detect_honeypot(candidate: Dict) -> Tuple[bool, str]:
                 f"far exceeds claimed exp ({claimed_months}mo)"
             )
 
-    # Dynamic threshold: suspicious if expert count high relative to experience
     skills       = candidate.get("skills", [])
     expert_count = sum(
         1 for s in skills
@@ -131,18 +126,22 @@ def detect_honeypot(candidate: Dict) -> Tuple[bool, str]:
 
 
 def score_skills(
-    candidate: Dict, job: Dict, full_text: str,
-    jd_vector=None, vectorizer=None
-) -> Tuple[float, List[str], List[str], List[str]]:
+    candidate: Dict,
+    job: Dict,
+    full_text: str,
+    jd_vector: Any = None,
+    vectorizer: Any = None,
+) -> Tuple[float, List[str], List[str], List[str], float]:
+    """Returns (score, reasons, matched, missing, semantic_sim)"""
     skills           = candidate.get("skills", [])
     signals          = candidate.get("redrob_signals", {})
     candidate_skills = [s["name"].lower() for s in skills]
     required_skills  = [s.lower() for s in job.get("required_skills", [])]
     score            = 0.0
-    reasons          = []
+    reasons: List[str] = []
 
     matched = [s for s in required_skills if s in candidate_skills]
-    alias_matched = []
+    alias_matched: List[str] = []
     for skill in required_skills:
         if skill not in matched:
             aliases = SKILL_ALIASES.get(skill, [])
@@ -229,41 +228,35 @@ def score_skills(
         elif hits >= 2:
             reasons.append("Some AI work in career descriptions")
 
-    return score, reasons, all_matched, missing
+    return score, reasons, all_matched, missing, semantic_sim
 
 
 def score_experience(years: float, job: Dict) -> Tuple[float, List[str]]:
     min_exp = job.get("min_experience_years", 5)
     max_exp = job.get("max_experience_years", 9)
-    reasons = []
+    reasons: List[str] = []
 
     if min_exp <= years <= max_exp:
-        exp_score = WEIGHTS["experience"]
+        exp_score = float(WEIGHTS["experience"])
     elif years > 12:
-        exp_score = 5
+        exp_score = 5.0
         reasons.append(f"Overqualified: {years} yrs")
     elif years > max_exp:
-        exp_score = 10
+        exp_score = 10.0
     elif years >= min_exp - 1:
-        exp_score = 8
+        exp_score = 8.0
     else:
-        exp_score = 3
+        exp_score = 3.0
 
     if "Overqualified" not in " ".join(reasons):
         reasons.append(f"{years} yrs experience")
 
-    return float(exp_score), reasons
+    return exp_score, reasons
 
 
 def score_title(current_title: str, job: Dict) -> Tuple[float, List[str]]:
-    """
-    Tiered title scoring — AI/ML roles score more than generic tech.
-    Tier 1 (15pts): AI Engineer, ML Engineer, NLP Engineer etc.
-    Tier 2 (12pts): Data Scientist, Senior Applied Scientist etc.
-    Tier 3 (7pts):  Software Engineer, Backend Engineer, Data Engineer
-    """
-    reasons      = []
-    tiered       = job.get("tiered_titles", {})
+    reasons: List[str] = []
+    tiered = job.get("tiered_titles", {})
 
     for title in tiered.get("tier_1", []):
         if title.lower() in current_title:
@@ -285,12 +278,14 @@ def score_title(current_title: str, job: Dict) -> Tuple[float, List[str]]:
 
 
 def score_career(
-    career: List, consulting_firms: List,
-    education: List, full_text: str,
-    consulting_ratio: float
+    career: List,
+    consulting_firms: List,
+    education: List,
+    full_text: str,
+    consulting_ratio: float,
 ) -> Tuple[float, List[str]]:
-    reasons = []
-    score   = 0.0
+    reasons: List[str] = []
+    score = 0.0
 
     product_roles = 0
     for job_entry in career:
@@ -313,7 +308,6 @@ def score_career(
         score += 5
         reasons.append("Some product company experience")
 
-    # Education — reduced to 1 point max (tiebreaker only)
     if education and isinstance(education, list):
         tiers = [edu.get("tier", "") for edu in education]
         if "tier_1" in tiers:
@@ -339,7 +333,7 @@ def score_location(country: str, location: str) -> Tuple[float, List[str]]:
 
 def score_signals(signals: Dict, job: Dict) -> Tuple[float, List[str]]:
     signal_score = 0.0
-    reasons      = []
+    reasons: List[str] = []
 
     completeness = signals.get("profile_completeness_score", 0)
     if completeness >= 80:
@@ -436,14 +430,19 @@ def score_signals(signals: Dict, job: Dict) -> Tuple[float, List[str]]:
         signal_score -= 1.5
         reasons.append(f"Long notice: {notice}d")
 
-    # Salary fit
-    salary_min = signals.get("expected_salary_range_inr_lpa", {}).get("min", 0)
-    budget_max = job.get("salary_budget_max_lpa", 40)
-    if salary_min <= budget_max * 0.8:
-        signal_score += 1          # Well within budget — likely to accept
-    elif salary_min > budget_max:
-        signal_score -= 2
-        reasons.append(f"Above budget (expects {salary_min}+ LPA)")
+    # Salary fit — small but realistic signal
+    salary_range = signals.get("expected_salary_range_inr_lpa", {})
+    salary_max   = salary_range.get("max", 0)
+    budget_max   = job.get("salary_budget_max_lpa", 40)
+    if salary_max > 0:
+        if salary_max <= budget_max:
+            signal_score += 1
+            reasons.append("Salary within budget")
+        elif salary_max <= budget_max * 1.2:
+            pass  # Slightly above — neutral
+        else:
+            signal_score -= 1
+            reasons.append(f"Salary above budget (max {salary_max} LPA)")
 
     if signals.get("preferred_work_mode", "") in ["onsite", "hybrid", "flexible"]:
         signal_score += 0.5
@@ -496,14 +495,142 @@ def score_signals(signals: Dict, job: Dict) -> Tuple[float, List[str]]:
     return max(-5, min(20, signal_score)), reasons
 
 
+def get_score_breakdown(
+    candidate: Dict,
+    job: Dict,
+    jd_vector: Any = None,
+    vectorizer: Any = None,
+) -> Dict[str, float]:
+    """
+    Returns detailed score breakdown per section.
+    Used by both main.py and app.py — single source of truth.
+    """
+    profile          = candidate.get("profile", {})
+    signals          = candidate.get("redrob_signals", {})
+    career           = candidate.get("career_history", [])
+    education        = candidate.get("education", [])
+    current_title    = profile.get("current_title", "").lower()
+    years_experience = profile.get("years_of_experience", 0)
+    consulting_firms = job.get("consulting_firms", [])
+    location         = profile.get("location", "").lower()
+    country          = profile.get("country", "").lower()
+
+    full_text = deduplicate_text(
+        profile.get("summary", "").lower() + " " +
+        profile.get("headline", "").lower() + " " +
+        " ".join(j.get("description", "").lower() for j in career)
+    )
+
+    s_score, _, _, _, _ = score_skills(
+        candidate, job, full_text, jd_vector, vectorizer
+    )
+    e_score, _  = score_experience(years_experience, job)
+    t_score, _  = score_title(current_title, job)
+
+    all_companies   = [j.get("company", "").lower() for j in career]
+    consulting_jobs = sum(
+        1 for c in all_companies
+        if any(firm in c for firm in consulting_firms)
+    )
+    total_jobs       = len(all_companies) if all_companies else 1
+    consulting_ratio = consulting_jobs / total_jobs
+
+    c_score, _  = score_career(
+        career, consulting_firms, education, full_text, consulting_ratio
+    )
+    l_score, _  = score_location(country, location)
+    sig_score, _ = score_signals(signals, job)
+
+    return {
+        "Skills":    round(s_score, 1),
+        "Experience": round(e_score, 1),
+        "Title":     round(t_score, 1),
+        "Career":    round(c_score, 1),
+        "Location":  round(l_score, 1),
+        "Signals":   round(sig_score, 1),
+    }
+
+
+def compare_candidates(
+    a: Dict, b: Dict, job: Dict,
+    score_a: float, score_b: float,
+    jd_vector: Any = None,
+    vectorizer: Any = None,
+) -> str:
+    """
+    Explains why candidate A outranked candidate B.
+    Used in Streamlit comparison mode.
+    """
+    bd_a = get_score_breakdown(a, job, jd_vector, vectorizer)
+    bd_b = get_score_breakdown(b, job, jd_vector, vectorizer)
+
+    differences = []
+    for section in bd_a:
+        diff = bd_a[section] - bd_b[section]
+        if diff >= 2:
+            differences.append(
+                f"{section}: +{round(diff, 1)} pts advantage"
+            )
+        elif diff <= -2:
+            differences.append(
+                f"{section}: -{round(abs(diff), 1)} pts disadvantage"
+            )
+
+    if differences:
+        return (
+            f"Rank #1 leads because: {'; '.join(differences[:3])}. "
+            f"Total margin: {round(score_a - score_b, 2)} pts."
+        )
+    return (
+        f"Scores are very close ({round(score_a - score_b, 2)} pts margin). "
+        f"Tie-broken by candidate ID."
+    )
+
+def get_confidence(
+    matched_skills: List[str],
+    semantic_sim: float,
+    signals: Dict,
+) -> str:
+    """High confidence requires matched_skills >= 4 AND semantic evidence."""
+    completeness = signals.get("profile_completeness_score", 0)
+    assessments  = signals.get("skill_assessment_scores", {})
+    evidence     = 0
+
+    if len(matched_skills) >= 6:
+        evidence += 3
+    elif len(matched_skills) >= 4:
+        evidence += 2
+    elif len(matched_skills) >= 2:
+        evidence += 1
+
+    if semantic_sim >= 0.15:
+        evidence += 2
+    elif semantic_sim >= 0.08:
+        evidence += 1
+
+    if completeness >= 75:
+        evidence += 2
+    elif completeness >= 50:
+        evidence += 1
+
+    if assessments:
+        evidence += 1
+
+    if evidence >= 7:
+        return "High"
+    elif evidence >= 4:
+        return "Medium"
+    return "Low"
+
 def score_candidate(
-    candidate: Dict, job: Dict,
-    jd_tfidf_vector=None,
-    tfidf_vectorizer=None
+    candidate: Dict,
+    job: Dict,
+    jd_tfidf_vector: Any = None,
+    tfidf_vectorizer: Any = None,
 ) -> Tuple[float, str]:
 
-    score   = 0.0
-    reasons = []
+    score: float     = 0.0
+    reasons: List[str] = []
 
     profile          = candidate.get("profile", {})
     signals          = candidate.get("redrob_signals", {})
@@ -536,7 +663,6 @@ def score_candidate(
         if flag in current_title:
             return 0.0, f"Disqualified: junior role ({current_title})"
 
-    # Consulting penalty — only when weak AI evidence
     all_companies   = [j.get("company", "").lower() for j in career]
     consulting_jobs = sum(
         1 for c in all_companies
@@ -545,7 +671,7 @@ def score_candidate(
     total_jobs       = len(all_companies) if all_companies else 1
     consulting_ratio = consulting_jobs / total_jobs
 
-    ai_core = job.get("ai_core_terms", [])
+    ai_core     = job.get("ai_core_terms", [])
     ai_evidence = sum(1 for kw in ai_core if kw in full_text)
 
     if consulting_ratio == 1.0 and ai_evidence < 3:
@@ -558,7 +684,7 @@ def score_candidate(
         score -= 4
         reasons.append("Primarily consulting background")
 
-    s_score, s_reasons, matched, missing = score_skills(
+    s_score, s_reasons, matched, missing, _ = score_skills(
         candidate, job, full_text, jd_tfidf_vector, tfidf_vectorizer
     )
     score += s_score

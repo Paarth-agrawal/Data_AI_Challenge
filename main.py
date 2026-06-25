@@ -3,13 +3,13 @@ import sys
 import time
 import subprocess
 import jsonlines
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from job_description import JOB
 from scorer import (
     score_candidate, fix_title_caps, WEIGHTS,
-    deduplicate_text
+    deduplicate_text, compare_candidates, get_confidence
 )
 
 JD_TEXT = """
@@ -26,21 +26,15 @@ dense sparse fusion transformer architecture
 
 
 def get_confidence(
-    matched_skills: List,
+    matched_skills: List[str],
     semantic_sim: float,
-    signals: Dict
+    signals: Dict,
 ) -> str:
-    """
-    Confidence requires strong skill evidence AND semantic alignment.
-    Fix: High confidence now requires matched_skills >= 4.
-    """
+    """High confidence requires matched_skills >= 4 AND semantic evidence."""
     completeness = signals.get("profile_completeness_score", 0)
     assessments  = signals.get("skill_assessment_scores", {})
-    career_len   = 0  # will be passed separately if needed
+    evidence     = 0
 
-    evidence = 0
-
-    # Skills evidence — requires at least 4 for High
     if len(matched_skills) >= 6:
         evidence += 3
     elif len(matched_skills) >= 4:
@@ -48,19 +42,16 @@ def get_confidence(
     elif len(matched_skills) >= 2:
         evidence += 1
 
-    # Semantic evidence
     if semantic_sim >= 0.15:
         evidence += 2
     elif semantic_sim >= 0.08:
         evidence += 1
 
-    # Profile completeness
     if completeness >= 75:
         evidence += 2
     elif completeness >= 50:
         evidence += 1
 
-    # Verified assessments
     if assessments:
         evidence += 1
 
@@ -68,19 +59,18 @@ def get_confidence(
         return "High"
     elif evidence >= 4:
         return "Medium"
-    else:
-        return "Low"
+    return "Low"
 
 
 def build_reasoning(
     candidate: Dict,
     title: str,
     years: float,
-    matched_skills: List,
-    missing_skills: List,
+    matched_skills: List[str],
+    missing_skills: List[str],
     signals: Dict,
     score: float,
-    semantic_sim: float = 0.0
+    semantic_sim: float = 0.0,
 ) -> str:
     profile   = candidate.get("profile", {})
     career    = candidate.get("career_history", [])
@@ -99,10 +89,9 @@ def build_reasoning(
     interview_rate = signals.get("interview_completion_rate", 1)
     assessment     = signals.get("skill_assessment_scores", {})
 
-    strengths = []
-    concerns  = []
+    strengths: List[str] = []
+    concerns:  List[str] = []
 
-    # Skill strengths
     if len(matched_skills) >= 5:
         top = ", ".join(matched_skills[:4])
         strengths.append(
@@ -123,7 +112,6 @@ def build_reasoning(
     if semantic_sim >= 0.15:
         strengths.append("career history shows strong semantic JD alignment")
 
-    # Verified assessment
     rel_assessments = {
         k: v for k, v in assessment.items()
         if k.lower() in [
@@ -136,13 +124,11 @@ def build_reasoning(
             f"verified {best} assessment: {rel_assessments[best]}/100"
         )
 
-    # Availability
     if open_to_work and notice == 0:
         strengths.append("immediately available")
     elif open_to_work and notice <= 30:
         strengths.append(f"actively looking, {notice}-day notice")
 
-    # Engagement — all checked independently
     if response_rate >= 0.75:
         strengths.append(f"highly responsive ({int(response_rate*100)}%)")
     if github >= 70:
@@ -152,7 +138,6 @@ def build_reasoning(
     if offer_rate >= 0.7:
         strengths.append("strong offer acceptance history")
 
-    # Education
     if education and isinstance(education, list):
         tiers = [edu.get("tier", "") for edu in education]
         if "tier_1" in tiers:
@@ -162,11 +147,9 @@ def build_reasoning(
             )
             strengths.append(f"Tier-1 education ({inst})")
 
-    # Location
     if country and country.lower() == "india":
         strengths.append("location aligns with hiring preference")
 
-    # Concerns
     if len(missing_skills) >= 8:
         concerns.append(f"missing {len(missing_skills)} of 14 required JD skills")
     elif len(matched_skills) == 0:
@@ -190,7 +173,6 @@ def build_reasoning(
             f"based outside India ({location}) — relocation required"
         )
 
-    # Build balanced output
     opening = f"{title_display} with {years} years of experience"
     if strengths and concerns:
         body = (
@@ -208,23 +190,23 @@ def build_reasoning(
 def run_ranking(candidates_path: str, output_path: str) -> None:
     start_time = time.time()
     print(f"Loading candidates from {candidates_path}...")
-    print("Please wait — approximately 4 minutes on CPU...\n")
+    print("Approximately 4 minutes on CPU...\n")
 
-    all_candidates      = []
-    all_candidate_texts = []
+    all_candidates:      List[Dict]  = []
+    all_candidate_texts: List[str]   = []
 
     with jsonlines.open(candidates_path) as reader:
         for candidate in reader:
-            profile  = candidate.get("profile", {})
-            career   = candidate.get("career_history", [])
-            raw_text = (
+            profile = candidate.get("profile", {})
+            career  = candidate.get("career_history", [])
+            raw     = (
                 profile.get("summary", "").lower() + " " +
                 profile.get("headline", "").lower() + " " +
                 " ".join(s["name"].lower()
                           for s in candidate.get("skills", [])) + " " +
                 " ".join(j.get("description", "").lower() for j in career)
             )
-            all_candidate_texts.append(deduplicate_text(raw_text))
+            all_candidate_texts.append(deduplicate_text(raw))
             all_candidates.append(candidate)
 
     total = len(all_candidates)
@@ -240,9 +222,11 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
     print("Semantic model ready.\n")
 
     print("Scoring candidates...")
-    results               = []
-    disqualified          = 0
-    required_skills_lower = [s.lower() for s in JOB.get("required_skills", [])]
+    results:      List[Dict] = []
+    disqualified = 0
+    required_skills_lower = [
+        s.lower() for s in JOB.get("required_skills", [])
+    ]
 
     for i, candidate in enumerate(all_candidates):
         score, raw_reasoning = score_candidate(
@@ -283,11 +267,13 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
             "years":        years,
             "score":        score,
             "confidence":   confidence,
-            "reasoning":    reasoning
+            "reasoning":    reasoning,
+            "_candidate":   candidate,
         })
 
         if (i + 1) % 10000 == 0:
-            print(f"  Processed {i+1:,} candidates...")
+            elapsed_so_far = time.time() - start_time
+            print(f"  Processed {i+1:,} ({elapsed_so_far:.0f}s elapsed)...")
 
     print("\nSorting results...")
     results.sort(key=lambda x: (-x["score"], x["candidate_id"]))
@@ -307,7 +293,19 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
     print(f"\nTotal        : {total:,}")
     print(f"Qualified    : {qualified:,}")
     print(f"Disqualified : {disqualified:,}")
-    print(f"Runtime      : {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"Runtime      : {elapsed:.1f}s (~{elapsed/60:.1f} min)")
+
+    # Candidate vs candidate comparison for top 2
+    if len(results) >= 2:
+        comparison = compare_candidates(
+            results[0]["_candidate"],
+            results[1]["_candidate"],
+            JOB,
+            results[0]["score"],
+            results[1]["score"],
+            jd_vector, vectorizer
+        )
+        print(f"\nTop-2 comparison: {comparison}")
 
     print("\n========== TOP 10 CANDIDATES ==========\n")
     for i, r in enumerate(results[:10], 1):
@@ -336,7 +334,7 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
         capture_output=True, text=True
     )
     print(result.stdout if result.stdout else result.stderr)
-    print(f"\nTotal runtime: {elapsed:.1f}s")
+    print(f"\nTotal runtime: {elapsed:.1f}s (~{elapsed/60:.1f} min)")
     print("\n===== DONE =====")
 
 

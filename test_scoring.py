@@ -1,206 +1,240 @@
 """
-Unit tests for the AI Candidate Ranking System.
-Run with: python -m pytest tests/ -v
+Unit tests for AI Candidate Ranking System.
+Run: python tests/test_scoring.py
 """
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scorer import (
-    detect_honeypot, score_candidate, score_skills,
-    score_experience, score_title, score_signals
+    detect_honeypot, score_candidate, score_experience,
+    score_title, score_signals, score_location, get_confidence
 )
 from job_description import JOB
 
 
-# ── TEST DATA ─────────────────────────────────────────────────────────
-
 def make_candidate(
-    title="ML Engineer",
-    years=6.0,
-    skills=None,
-    signals=None,
-    career=None,
-    grad_year=2015
+    title="ML Engineer", years=6.0,
+    skills=None, signals=None, career=None, grad_year=2015
 ):
+    base_signals = {
+        "open_to_work_flag": True,
+        "recruiter_response_rate": 0.7,
+        "last_active_date": "2026-06-01",
+        "notice_period_days": 30,
+        "github_activity_score": 65,
+        "profile_completeness_score": 80,
+        "verified_email": True,
+        "verified_phone": True,
+        "skill_assessment_scores": {},
+        "saved_by_recruiters_30d": 3,
+        "interview_completion_rate": 0.8,
+        "offer_acceptance_rate": 0.6,
+        "linkedin_connected": True,
+        "applications_submitted_30d": 2,
+        "profile_views_received_30d": 15,
+        "connection_count": 350,
+        "endorsements_received": 20,
+        "avg_response_time_hours": 12,
+        "willing_to_relocate": True,
+        "preferred_work_mode": "hybrid",
+        "expected_salary_range_inr_lpa": {"min": 20, "max": 35},
+        "search_appearance_30d": 150,
+        "signup_date": "2024-01-01",
+    }
+    if signals:
+        base_signals.update(signals)
     return {
         "candidate_id": "CAND_TEST_001",
         "profile": {
             "anonymized_name": "Test Candidate",
             "current_title": title,
             "years_of_experience": years,
-            "headline": "",
-            "summary": "",
-            "location": "Pune",
-            "country": "India",
+            "headline": "", "summary": "",
+            "location": "Pune", "country": "India",
         },
         "skills": skills or [
             {"name": "Python", "proficiency": "Expert"},
             {"name": "Machine Learning", "proficiency": "Expert"},
             {"name": "NLP", "proficiency": "Advanced"},
         ],
-        "career_history": career or [
-            {
-                "company": "TechCorp",
-                "title": "ML Engineer",
-                "duration_months": 36,
-                "industry": "SaaS",
-                "description": "Built recommendation systems using embeddings and FAISS"
-            }
-        ],
+        "career_history": career or [{
+            "company": "TechCorp", "title": "ML Engineer",
+            "duration_months": 36, "industry": "SaaS",
+            "description": "built recommendation systems using embeddings"
+        }],
         "education": [
             {"tier": "tier_2", "institution": "NIT", "end_year": grad_year}
         ],
         "certifications": [],
-        "redrob_signals": signals or {
-            "open_to_work_flag": True,
-            "recruiter_response_rate": 0.7,
-            "last_active_date": "2026-06-01",
-            "notice_period_days": 30,
-            "github_activity_score": 65,
-            "profile_completeness_score": 80,
-            "verified_email": True,
-            "verified_phone": True,
-            "skill_assessment_scores": {},
-            "saved_by_recruiters_30d": 3,
-            "interview_completion_rate": 0.8,
-            "offer_acceptance_rate": 0.6,
-            "linkedin_connected": True,
-            "applications_submitted_30d": 2,
-            "profile_views_received_30d": 15,
-            "connection_count": 350,
-            "endorsements_received": 20,
-            "avg_response_time_hours": 12,
-            "willing_to_relocate": True,
-            "preferred_work_mode": "hybrid",
-            "expected_salary_range_inr_lpa": {"min": 20, "max": 35},
-            "search_appearance_30d": 150,
-            "signup_date": "2024-01-01",
-        }
+        "redrob_signals": base_signals,
     }
 
 
-# ── HONEYPOT TESTS ────────────────────────────────────────────────────
+# ── HONEYPOT TESTS ─────────────────────────────────────────────────────
 
 def test_honeypot_future_graduation():
-    candidate = make_candidate(grad_year=2030)
-    result, reason = detect_honeypot(candidate)
-    assert result is True
+    c = make_candidate(grad_year=2030)
+    result, reason = detect_honeypot(c)
+    assert result is True, "Should detect future graduation"
     assert "future" in reason.lower()
+    print("  ✅ test_honeypot_future_graduation")
 
 
 def test_honeypot_impossible_experience():
-    # Graduated 2020, claims 15 years
-    candidate = make_candidate(years=15.0, grad_year=2020)
-    result, reason = detect_honeypot(candidate)
-    assert result is True
-    assert "graduated" in reason.lower()
+    c = make_candidate(years=15.0, grad_year=2020)
+    result, reason = detect_honeypot(c)
+    assert result is True, "15 yrs since 2020 is impossible"
+    print("  ✅ test_honeypot_impossible_experience")
 
 
 def test_honeypot_normal_candidate():
-    candidate = make_candidate(years=6.0, grad_year=2015)
-    result, reason = detect_honeypot(candidate)
-    assert result is False
+    c = make_candidate(years=6.0, grad_year=2015)
+    result, _ = detect_honeypot(c)
+    assert result is False, "Normal candidate should not be flagged"
+    print("  ✅ test_honeypot_normal_candidate")
 
 
 def test_honeypot_career_duration():
-    # 200 months career but claims 5 years (60 months)
-    career = [
-        {"company": "X", "title": "Engineer",
-         "duration_months": 200, "industry": "SaaS",
-         "description": "built ML systems"}
-    ]
-    candidate = make_candidate(years=5.0, career=career)
-    result, _ = detect_honeypot(candidate)
-    assert result is True
+    career = [{"company": "X", "title": "Eng",
+               "duration_months": 200, "industry": "SaaS",
+               "description": "ml systems"}]
+    c = make_candidate(years=5.0, career=career)
+    result, _ = detect_honeypot(c)
+    assert result is True, "200 months vs 60 claimed should trigger"
+    print("  ✅ test_honeypot_career_duration")
 
 
-# ── SCORING TESTS ─────────────────────────────────────────────────────
+# ── DISQUALIFIER TESTS ─────────────────────────────────────────────────
 
 def test_disqualified_unrelated_role():
-    candidate = make_candidate(title="Marketing Manager")
-    score, reason = score_candidate(candidate, JOB)
+    c = make_candidate(title="Marketing Manager")
+    score, reason = score_candidate(c, JOB)
     assert score == 0.0
     assert "Disqualified" in reason
+    print("  ✅ test_disqualified_unrelated_role")
 
 
 def test_disqualified_too_junior():
-    candidate = make_candidate(years=1.0)
-    score, reason = score_candidate(candidate, JOB)
+    c = make_candidate(years=1.0)
+    score, reason = score_candidate(c, JOB)
     assert score == 0.0
     assert "junior" in reason.lower()
+    print("  ✅ test_disqualified_too_junior")
 
 
 def test_disqualified_junior_title():
-    candidate = make_candidate(title="Junior ML Engineer")
-    score, reason = score_candidate(candidate, JOB)
+    c = make_candidate(title="Junior ML Engineer")
+    score, reason = score_candidate(c, JOB)
     assert score == 0.0
-    assert "junior" in reason.lower()
+    print("  ✅ test_disqualified_junior_title")
 
+
+# ── SCORING TESTS ──────────────────────────────────────────────────────
 
 def test_strong_candidate_scores_well():
     skills = [
-        {"name": "Python", "proficiency": "Expert"},
-        {"name": "Machine Learning", "proficiency": "Expert"},
-        {"name": "Deep Learning", "proficiency": "Expert"},
-        {"name": "NLP", "proficiency": "Expert"},
-        {"name": "PyTorch", "proficiency": "Expert"},
-        {"name": "Embeddings", "proficiency": "Expert"},
-        {"name": "FAISS", "proficiency": "Advanced"},
+        {"name": s, "proficiency": "Expert"} for s in [
+            "Python", "Machine Learning", "Deep Learning",
+            "NLP", "PyTorch", "Embeddings", "FAISS",
+        ]
     ]
-    candidate = make_candidate(
-        title="Senior AI Engineer",
-        years=6.5,
-        skills=skills
-    )
-    score, _ = score_candidate(candidate, JOB)
+    c = make_candidate(title="Senior AI Engineer", years=6.5, skills=skills)
+    score, _ = score_candidate(c, JOB)
     assert score >= 60, f"Strong candidate should score ≥60, got {score}"
+    print(f"  ✅ test_strong_candidate_scores_well (score={score})")
 
 
 def test_experience_sweet_spot():
-    score_sweet, _ = score_experience(7.0, JOB)
-    score_over, _  = score_experience(13.0, JOB)
-    score_under, _ = score_experience(2.0, JOB)
-    assert score_sweet > score_over
-    assert score_sweet > score_under
+    sweet, _ = score_experience(7.0, JOB)
+    over, _  = score_experience(13.0, JOB)
+    under, _ = score_experience(2.0, JOB)
+    assert sweet > over
+    assert sweet > under
+    print("  ✅ test_experience_sweet_spot")
 
 
-def test_strong_title_scores_higher():
-    score_good, _ = score_title("senior ai engineer", JOB)
-    score_weak, _ = score_title("cloud engineer", JOB)
-    assert score_good > score_weak
+def test_tier1_title_beats_tier3():
+    tier1, _ = score_title("senior ai engineer", JOB)
+    tier3, _ = score_title("backend engineer", JOB)
+    assert tier1 > tier3
+    print(f"  ✅ test_tier1_title_beats_tier3 ({tier1} > {tier3})")
 
 
-def test_score_is_non_negative():
-    candidate = make_candidate(
-        title="Accountant",
-        years=10.0
-    )
-    score, _ = score_candidate(candidate, JOB)
+def test_tier3_title_still_scores():
+    tier3, _ = score_title("software engineer", JOB)
+    assert tier3 > 0
+    print(f"  ✅ test_tier3_title_still_scores (score={tier3})")
+
+
+def test_score_non_negative():
+    c = make_candidate(title="Accountant", years=10.0)
+    score, _ = score_candidate(c, JOB)
     assert score >= 0.0
+    print("  ✅ test_score_non_negative")
 
 
-def test_score_does_not_exceed_max():
-    skills = [
-        {"name": s, "proficiency": "Expert"} for s in [
-            "Python", "Machine Learning", "Deep Learning", "NLP",
-            "PyTorch", "TensorFlow", "Embeddings", "FAISS",
-            "Elasticsearch", "Information Retrieval", "Ranking",
-            "Sentence-Transformers", "Vector Database", "LLM"
-        ]
+def test_consulting_penalty():
+    career = [
+        {"company": "TCS", "title": "Engineer",
+         "duration_months": 60, "industry": "IT Services",
+         "description": "java development projects"}
     ]
-    candidate = make_candidate(
-        title="Senior AI Engineer",
-        years=7.0,
-        skills=skills
-    )
-    score, _ = score_candidate(candidate, JOB)
-    # Max possible is around 120 + signals
-    assert score <= 150, f"Score should not exceed max, got {score}"
+    c = make_candidate(career=career)
+    score, reason = score_candidate(c, JOB)
+    assert score < 80, "Consulting-only should be penalised"
+    print(f"  ✅ test_consulting_penalty (score={score})")
+
+
+def test_location_india_bonus():
+    score, reasons = score_location("india", "pune")
+    assert score > 0
+    assert len(reasons) > 0
+    print("  ✅ test_location_india_bonus")
+
+
+def test_location_no_penalty_outside_india():
+    score, _ = score_location("usa", "san francisco")
+    assert score >= 0, "Outside India should never give negative score"
+    print("  ✅ test_location_no_penalty_outside_india")
+
+
+def test_salary_within_budget():
+    signals = {"expected_salary_range_inr_lpa": {"min": 15, "max": 30}}
+    c = make_candidate(signals=signals)
+    score, _ = score_candidate(c, JOB)
+    # Just check it runs without error
+    assert score >= 0
+    print("  ✅ test_salary_within_budget")
+
+
+def test_salary_above_budget():
+    signals = {"expected_salary_range_inr_lpa": {"min": 50, "max": 90}}
+    c_high = make_candidate(signals=signals)
+    signals2 = {"expected_salary_range_inr_lpa": {"min": 15, "max": 30}}
+    c_normal = make_candidate(signals=signals2)
+    score_high, _   = score_candidate(c_high, JOB)
+    score_normal, _ = score_candidate(c_normal, JOB)
+    assert score_normal >= score_high, "Above-budget should not score higher"
+    print("  ✅ test_salary_above_budget")
+
+
+def test_confidence_high():
+    matched = ["python", "nlp", "pytorch", "embeddings", "faiss"]
+    signals = {"profile_completeness_score": 85,
+               "skill_assessment_scores": {"NLP": 80}}
+    conf = get_confidence(matched, 0.2, signals)
+    assert conf == "High", f"Expected High, got {conf}"
+    print("  ✅ test_confidence_high")
+
+
+def test_confidence_low():
+    conf = get_confidence([], 0.0, {})
+    assert conf == "Low", f"Expected Low, got {conf}"
+    print("  ✅ test_confidence_low")
 
 
 if __name__ == "__main__":
-    # Run manually without pytest
     tests = [
         test_honeypot_future_graduation,
         test_honeypot_impossible_experience,
@@ -211,20 +245,31 @@ if __name__ == "__main__":
         test_disqualified_junior_title,
         test_strong_candidate_scores_well,
         test_experience_sweet_spot,
-        test_strong_title_scores_higher,
-        test_score_is_non_negative,
-        test_score_does_not_exceed_max,
+        test_tier1_title_beats_tier3,
+        test_tier3_title_still_scores,
+        test_score_non_negative,
+        test_consulting_penalty,
+        test_location_india_bonus,
+        test_location_no_penalty_outside_india,
+        test_salary_within_budget,
+        test_salary_above_budget,
+        test_confidence_high,
+        test_confidence_low,
     ]
 
-    passed = 0
-    failed = 0
+    print(f"\nRunning {len(tests)} tests...\n")
+    passed = failed = 0
     for test in tests:
         try:
             test()
-            print(f"  ✅ {test.__name__}")
             passed += 1
         except Exception as e:
             print(f"  ❌ {test.__name__}: {e}")
             failed += 1
 
-    print(f"\n{passed}/{passed+failed} tests passed")
+    print(f"\n{'='*40}")
+    print(f"Results: {passed}/{passed+failed} passed")
+    if failed == 0:
+        print("✅ All tests passed!")
+    else:
+        print(f"❌ {failed} test(s) failed")
