@@ -9,7 +9,7 @@ ai_tools_declared:
 compute_environment: "Windows 11, Python 3.12, 16GB RAM, CPU only, ~4 minutes"
 team_members:
   - name: "Paarth Agrawal"
-    email: "YOUR_EMAIL_HERE"
+    email: "paarthagrawal01@gmail.com"
 methodology_summary: >
   Multi-signal candidate ranking system for Senior AI Engineer role.
   Uses tiered skill matching (exact + alias + TF-IDF semantic similarity),
