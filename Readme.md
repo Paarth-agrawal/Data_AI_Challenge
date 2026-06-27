@@ -1,14 +1,13 @@
 # AI Candidate Ranking System
 ### Redrob Data & AI Hackathon — Senior AI Engineer Role
 
-## Team
-- Paarth Agrawal
-- Piyush Jakhar
+## About
+Built by **Paarth Agrawal** — solo submission.
 
 ## What This Does
 Ranks 100,000 candidates for a Senior AI Engineer role using a
-multi-signal scoring system that combines exact skill matching,
-semantic similarity, career quality analysis, and 23 behavioral
+multi-signal scoring system combining exact skill matching, TF-IDF
+semantic similarity, career quality analysis, and all 23 behavioral
 signals from the Redrob platform.
 
 ## Single Command to Reproduce Submission
@@ -18,8 +17,9 @@ python main.py --candidates ./candidates.jsonl --out ./submission.csv
 ```
 
 Processes all 100,000 candidates and outputs a validated
-`submission.csv` in **under 5 minutes** on CPU only.
-No GPU required. No external API calls.
+`submission.csv` in **approximately 4 minutes** on CPU only.
+No GPU. No external API calls. Fully deterministic — same input
+always produces the same output.
 
 ## Setup
 
@@ -40,15 +40,15 @@ candidates.jsonl (100,000 profiles)
 │  • Unrelated job function           │
 │  • Under 2 years experience         │
 │  • Junior title                     │
-│  • Honeypot detection               │
+│  • Honeypot detection (5 checks)    │
 └─────────────────┬───────────────────┘
                   │ ~24K pass through
                   ▼
 ┌─────────────────────────────────────┐
 │        CONSULTING PENALTY           │
-│  (penalty only, not rejection)      │
-│  Applied only when consulting       │
-│  career + weak AI evidence          │
+│  Penalty only — not rejection       │
+│  Applied only when consulting +     │
+│  weak AI evidence combined          │
 └─────────────────┬───────────────────┘
                   │
                   ▼
@@ -56,112 +56,117 @@ candidates.jsonl (100,000 profiles)
 │           SCORING ENGINE            │
 │                                     │
 │  Skill Match          35 pts        │
-│  Semantic (TF-IDF)    10 pts        │
+│  TF-IDF Semantic      10 pts        │
 │  Skill Assessments     5 pts        │
 │  Bonus Skills          5 pts        │
 │  Experience           15 pts        │
 │  Job Title            15 pts        │
 │  Career Quality       10 pts        │
-│  Location              2 pts        │
-│  Education             3 pts        │
 │  Behavioral Signals   20 pts        │
-│  ─────────────────────────          │
-│  Total               120 pts        │
+│  Location              2 pts        │
+│  Education             1 pt         │
 └─────────────────┬───────────────────┘
                   │
                   ▼
 ┌─────────────────────────────────────┐
-│      SORT + NORMALIZE (0–1)         │
-│   Tie-break: candidate_id ASC       │
-└─────────────────┬───────────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────┐
-│    REASONING + CONFIDENCE           │
-│  Strengths: skill depth, verified   │
-│  assessments, availability,         │
-│  engagement, semantic alignment     │
-│  Concerns: missing skills, notice,  │
-│  inactivity, location, interview    │
+│  SORT → NORMALIZE (0–1) → RANK      │
+│  Tie-break: candidate_id ASC        │
 │  Confidence: High / Medium / Low    │
 └─────────────────┬───────────────────┘
                   │
                   ▼
          submission.csv
-         (Top 100, ranks 1–100,
-          scores 0–1 normalized)
+         (Top 100, ranks 1–100)
 ```
 
 ## Scoring Breakdown
 
-| Signal | Points | What We Check |
-|--------|--------|---------------|
-| Skill Match | 35 | 14 required skills from JD + alias matching |
-| Semantic Match | 10 | TF-IDF cosine similarity of career text to JD |
-| Skill Assessments | 5 | Verified platform test scores |
-| Bonus Skills | 5 | LoRA, QLoRA, Pinecone, Weaviate, Milvus etc. |
-| Experience | 15 | 5–9 year sweet spot from JD |
-| Job Title | 15 | AI/ML Engineer, Data Scientist, Applied Scientist etc. |
-| Career Quality | 10 | Product company vs consulting history |
-| Behavioral Signals | 20 | All 23 Redrob platform signals |
-| Location | 2 | Bonus for India-based (never a penalty) |
-| Education | 3 | Tier-1/2 institution (tiebreaker only) |
+| Signal | Points | What We Check | Why This Weight |
+|--------|--------|---------------|----------------|
+| Skill Match | 35 | 14 required skills + alias matching | Direct JD requirement — primary evidence |
+| TF-IDF Semantic | 10 | Cosine similarity of career text to JD | Catches transferable experience |
+| Assessments | 5 | Verified platform test scores | More reliable than self-reported |
+| Bonus Skills | 5 | LoRA, QLoRA, Pinecone, Weaviate etc. | Depth signal |
+| Experience | 15 | 5–9 year sweet spot from JD | JD explicitly specifies range |
+| Job Title | 15 | Tiered — AI titles score higher | Job function must align |
+| Career Quality | 10 | Product vs consulting history | Startup relevance |
+| Behavioral Signals | 20 | All 23 Redrob signals (capped) | Real hirability signal |
+| Location | 2 | India-based bonus only | Soft preference, never penalty |
+| Education | 1 | Tier-1 tiebreaker only | Minimal bias impact |
 
 ## Weight Selection Methodology
 
-Weights were chosen to reflect how a senior technical recruiter
-would prioritise evidence when hiring for this role:
+Weights reflect how a senior technical recruiter prioritises evidence:
 
-- **Skills (35pts)** — Direct JD requirement match is the strongest signal.
-  A candidate who lists the exact skills needed provides explicit evidence.
-- **Semantic (10pts)** — TF-IDF captures transferable experience not in
-  the skills list. An engineer who "built dense retrieval pipelines" matches
-  even without listing "Information Retrieval" as a skill.
-- **Assessment scores (5pts)** — Verified platform test scores are more
-  reliable than self-reported skills. Weighted lower due to sparse coverage.
-- **Experience (15pts)** — The JD explicitly requests 5–9 years. Under/over
-  experience is penalised proportionally.
-- **Title (15pts)** — Job function must align. A Marketing Manager with Python
-  skills is not an AI Engineer regardless of other signals.
-- **Career quality (10pts)** — Product company experience indicates hands-on
-  engineering vs managed services delivery.
-- **Behavioral signals (20pts)** — Capped at 20pts to prevent popular
-  candidates from outscoring technically strong ones. Reflects real
-  hirability: open-to-work, response rate, notice period, GitHub activity.
-- **Location (2pts)** — Soft bonus for India proximity. Never penalises
-  global candidates.
-- **Education (3pts)** — Minor tiebreaker. A strong self-taught engineer
-  always outranks a weak Tier-1 graduate.
+- **Skills (35pts):** Direct match is the strongest verifiable signal
+- **Semantic (10pts):** TF-IDF catches "dense retrieval" when "FAISS" isn't listed
+- **Assessments (5pts):** Verified scores are more reliable than self-reported
+- **Experience (15pts):** JD specifies 5-9 years — over/under is penalised
+- **Title (15pts):** A Marketing Manager with Python is NOT an AI Engineer
+- **Career (10pts):** Product company experience signals startup readiness
+- **Signals (20pts):** Capped to prevent popular candidates outscoring skilled ones
+- **Location (2pts):** Soft bonus — global candidates evaluated on equal footing
+- **Education (1pt):** Tiebreaker only — a strong self-taught engineer always wins
+
+## Design Decisions
+
+| Decision | Reason | Trade-off |
+|----------|--------|-----------|
+| TF-IDF not Sentence Transformers | CPU-only, no model download, runs in 4 min | Less semantic than embeddings |
+| Consulting = penalty not rejection | Strong AI engineers exist at TCS/Infosys | May still affect some good candidates |
+| Location = bonus only | Fairness — global talent evaluated equally | Slightly less signal for location fit |
+| Education = 1 point only | Prevents institutional prestige bias | Underweights some quality signals |
+| No LLM APIs | Reproducible, deterministic, offline | Less flexible reasoning |
+| Behavioral cap at 20pts | Prevents popularity from rescuing weak profiles | May underreward highly engaged candidates |
 
 ## Sample Candidate Flow
 
-Here is exactly how a real top candidate is scored:
-
 ```
-Candidate: Aarav Trivedi
-Role: Senior Machine Learning Engineer, 7.2 years
+Input:  Senior ML Engineer, 7.2 yrs, India
+        Skills: Deep Learning, Embeddings, Information Retrieval
+        Signals: Open to work, 15-day notice, GitHub: 94.8
 
 Scoring:
-  Skill match (3/14 matched)        →  7.5 pts
-  Alias/semantic skill match        →  5.0 pts  (inferred skills)
-  Bonus skills (qlora, pinecone)    →  3.0 pts
-  Assessment (Deep Learning: 94)    →  4.7 pts
-  Career description keywords       →  5.0 pts  (TF-IDF)
-  Experience (7.2 yrs, sweet spot)  → 15.0 pts
-  Title (ML Engineer → match)       → 15.0 pts
-  Product company history           → 10.0 pts
-  Location (India)                  →  2.0 pts
-  Education (Tier-2)                →  1.0 pts
-  Behavioral signals                → 19.5 pts
-  ─────────────────────────────────
-  Raw total                         → 87.7 pts
-  Normalized                        →  1.000
+  Skill match (3/14)            →  7.5 pts
+  Alias/semantic inferred       →  5.0 pts
+  TF-IDF semantic alignment     →  8.5 pts
+  Experience (7.2 yrs)          → 15.0 pts
+  Title (Senior ML Engineer)    → 15.0 pts
+  Career (product history)      → 10.0 pts
+  Location (India)              →  2.0 pts
+  Education (Tier-2)            →  1.0 pts
+  Behavioral signals            → 19.5 pts
+                                ─────────
+  Raw total                     → 83.5 pts
+  Normalized                    →  1.000
+  Confidence                    →  High
 
 Reasoning: "Senior Machine Learning Engineer with 7.2 years.
 Strengths: deep learning, embeddings, information retrieval
-background; verified Deep Learning assessment 94/100;
+background matches JD; verified Deep Learning 94/100;
 actively looking, 15-day notice. Concerns: none significant."
 ```
+
+## Honeypot Detection
+
+Catches ~80 synthetic profiles via 5 checks:
+
+1. **Future graduation** — graduation year > current year
+2. **Experience mismatch** — claims more years than possible since graduation
+3. **Pre-founding employment** — started at company before it was founded
+4. **Duration overflow** — career months exceed claimed experience by 4+ years
+5. **Skill inflation** — dynamic threshold based on experience + endorsements
+
+Conservative thresholds prevent false positives on genuine senior engineers.
+
+## Fairness Design
+
+- **Gender/name/age:** Never used — fully anonymized candidate IDs only
+- **Location:** India is +2 bonus only. Zero penalty for global candidates
+- **Education:** Maximum 1 point — pure tiebreaker only
+- **Consulting firms:** Penalty only when AI evidence is also weak
+- **Behavioral signals:** Hard-capped at 20pts to prevent popularity bias
+- **Reproducibility:** Identical input → identical output every time
 
 ## All 23 Behavioral Signals Used
 
@@ -189,77 +194,57 @@ actively looking, 15-day notice. Concerns: none significant."
 22. verified_phone
 23. linkedin_connected
 
-## Honeypot Detection
-
-The dataset contains ~80 synthetic "honeypot" profiles with
-impossible characteristics. Our system detects them via:
-
-- **Future graduation year** — grad_year > current_year
-- **Experience vs graduation mismatch** — claims more years than
-  possible given graduation date
-- **Pre-founding employment** — started at company before it existed
-- **Career duration overflow** — career months exceed claimed
-  experience by more than 4 years
-- **Impossible expertise** — 20+ expert skills with under 8 years
-  experience AND low endorsements
-
-Conservative thresholds prevent false positives on legitimate
-senior engineers with broad skill sets.
-
-## Fairness Design
-
-- **Location:** India proximity is a +2 bonus. There is no penalty
-  for candidates outside India.
-- **Education:** Tier-1 institutions add at most 3 points — treated
-  as a tiebreaker. A strong self-taught engineer outranks a weak
-  Tier-1 graduate.
-- **Consulting firms:** Penalty applied only when consulting history
-  is combined with weak AI evidence. A brilliant AI engineer from
-  TCS who built RAG systems scores competitively.
-- **Behavioral signals:** Hard-capped at 20 points to prevent
-  popular candidates from rescuing weak technical profiles.
-
 ## Limitations
 
-- Semantic matching uses TF-IDF (lexical similarity), not transformer
-  embeddings. Two phrases with the same meaning but different words
-  may not match perfectly.
-- Scoring weights are heuristic, not learned from historical hiring
-  data.
-- Alias dictionary covers common equivalents but cannot be exhaustive.
+- TF-IDF is lexical similarity, not true semantic understanding
+- Scoring weights are heuristic, not learned from historical hiring data
+- Alias dictionary cannot be exhaustive
 
 ## Future Improvements
 
 - Sentence Transformers (all-MiniLM-L6-v2) for true semantic matching
 - Learning-to-rank calibration from historical hiring outcomes
 - Timeline overlap detection for more accurate honeypot detection
-- Expanded skill alias dictionary
+
+## Complexity
+
+- **Time:** O(n) — each candidate scored independently
+- **Space:** O(n) — all candidates held in memory for sorting
+- **TF-IDF build:** O(n × vocab) — one-time cost at startup
+- **Runtime (100K candidates):** approximately 4 minutes on CPU
 
 ## Benchmark
 
 Measured on Windows 11, Python 3.12, 16GB RAM, AMD Ryzen 7, CPU only:
 
 ```
+Dataset load:            ~15 seconds
 TF-IDF model build:      ~40 seconds
 Candidate scoring:       ~180 seconds
 Sort + normalize:        ~5 seconds
-Total (100K candidates): ~225 seconds (under 4 minutes)
+─────────────────────────────────────
+Total (100K candidates): ~240 seconds (~4 minutes)
 ```
 
 ## File Structure
 
 ```
-main.py                  — Pipeline: load, score, rank, output
-scorer.py                — Scoring functions + honeypot detection
-job_description.py       — Role spec and signal weights
-app.py                   — Streamlit demo
-requirements.txt         — Dependencies
-submission.csv           — Generated output (top 100)
-submission_metadata.yaml — Team and methodology
+config.py                — All thresholds and weights (single source of truth)
+main.py                  — Pipeline: load, score, rank, normalize, output
+scorer.py                — All scoring functions + honeypot detection
+job_description.py       — Role specification
+app.py                   — Streamlit interactive demo
+test_scoring.py          — 26 unit tests covering all scoring functions
+requirements.txt         — Pinned dependencies
+submission.csv           — Generated output (top 100 candidates)
+submission_metadata.yaml — Submission details
 validate_submission.py   — Official format validator
 sample_candidates.json   — 50-candidate test set
 ```
 
 ## AI Tools Used
 
-Claude (Anthropic) — code assistance and debugging
+- **Claude (Anthropic)** — code architecture, debugging, scoring logic
+- **ChatGPT (OpenAI)** — code review, audit suggestions
+- **Gemini (Google)** — additional review and suggestions
+- **Redrob AI** — challenge-specific feedback and auditing

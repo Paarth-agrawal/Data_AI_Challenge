@@ -5,17 +5,21 @@ primary_contact_phone: "YOUR_PHONE_HERE"
 github_repository_url: "https://github.com/Paarth-agrawal/Data_AI_Challenge"
 sandbox_demo_link: "https://data-ai-challenge.streamlit.app/"
 ai_tools_declared:
-  - Claude (Anthropic)
-compute_environment: "Windows 11, Python 3.12, 16GB RAM, CPU only, ~4 minutes"
+  - "Claude (Anthropic) — code architecture and debugging"
+  - "ChatGPT (OpenAI) — code review and audit"
+  - "Gemini (Google) — additional review"
+  - "Redrob AI — challenge-specific feedback"
+compute_environment: "Windows 11, Python 3.12, 16GB RAM, AMD Ryzen 7, CPU only, ~4 minutes"
 team_members:
   - name: "Paarth Agrawal"
-    email: "paarthagrawal01@gmail.com"
+    email: "YOUR_EMAIL_HERE"
 methodology_summary: >
   Multi-signal candidate ranking system for Senior AI Engineer role.
-  Uses tiered skill matching (exact + alias + TF-IDF semantic similarity),
-  experience sweet-spot scoring, tiered title matching, product company
-  career quality, location fit, and all 23 Redrob behavioral signals.
-  Includes honeypot detection, consulting penalty (not disqualification),
-  and strengths/concerns reasoning with confidence scoring.
-  Processes 100,000 candidates in approximately 4 minutes on CPU only
-  with no external API calls and no GPU requirement.
+  Combines exact skill matching with alias expansion and TF-IDF semantic
+  similarity, tiered title scoring, product company career quality,
+  location fit, and all 23 Redrob behavioral signals. Includes honeypot
+  detection (5 checks), consulting penalty (not disqualification), and
+  strengths/concerns reasoning with High/Medium/Low confidence scoring.
+  All thresholds centralized in config.py for transparency.
+  Processes 100,000 candidates in approximately 4 minutes on CPU only.
+  No GPU, no external API calls, fully deterministic.
