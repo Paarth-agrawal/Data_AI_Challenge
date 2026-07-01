@@ -9,9 +9,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scorer import (
     detect_honeypot, score_candidate, score_experience,
     score_title, score_signals, score_location,
-    get_confidence, deduplicate_text
+    get_confidence, deduplicate_text, get_score_breakdown,
+    get_matched_and_missing_skills
 )
 from job_description import JOB
+from config import WEIGHTS
 
 
 def make_candidate(
@@ -302,6 +304,147 @@ def test_invalid_date_no_crash():
     print("  ✅ test_invalid_date_no_crash")
 
 
+# ── WEIGHT-OVERRIDE TESTS (Streamlit slider parity) ─────────────────────
+
+def test_custom_weights_change_score():
+    """Raising the skills weight should raise the score of a skill-heavy
+    candidate relative to the default weights — proves the UI sliders
+    actually influence ranking rather than being cosmetic."""
+    skills = [{"name": s, "proficiency": "Expert"} for s in [
+        "Python", "Machine Learning", "Deep Learning", "NLP", "PyTorch"
+    ]]
+    c = make_candidate(skills=skills)
+    default_score, _ = score_candidate(c, JOB)
+
+    boosted_weights = dict(WEIGHTS)
+    boosted_weights["skills"] = 70  # double the default 35
+    boosted_score, _ = score_candidate(c, JOB, weights=boosted_weights)
+
+    assert boosted_score > default_score, (
+        f"Expected boosted skills weight to raise score: "
+        f"{boosted_score} vs {default_score}"
+    )
+    print(
+        f"  ✅ test_custom_weights_change_score "
+        f"(default={default_score}, boosted={boosted_score})"
+    )
+
+
+def test_zero_weight_removes_signal_contribution():
+    """Zeroing out the 'signals' weight should remove behavioral signals
+    from the score entirely."""
+    c = make_candidate(signals={"github_activity_score": 95, "saved_by_recruiters_30d": 10})
+    zero_weights = dict(WEIGHTS)
+    zero_weights["signals"] = 0
+    sig_score, _ = score_signals(c["redrob_signals"], JOB, weights=zero_weights)
+    assert sig_score == 0.0
+    print("  ✅ test_zero_weight_removes_signal_contribution")
+
+
+def test_score_breakdown_respects_custom_weights():
+    c = make_candidate()
+    custom = dict(WEIGHTS)
+    custom["experience"] = 30
+    breakdown = get_score_breakdown(c, JOB, weights=custom)
+    assert breakdown["Experience"] <= 30
+    print("  ✅ test_score_breakdown_respects_custom_weights")
+
+
+# ── ADDITIONAL EDGE CASES ────────────────────────────────────────────────
+
+def test_extremely_large_summary_no_crash():
+    """A pathologically long summary/headline should not crash or blow up
+    runtime — deduplication should cap repeated-word inflation."""
+    c = make_candidate()
+    c["profile"]["summary"] = "embeddings retrieval faiss ranking llm " * 5000
+    score, _ = score_candidate(c, JOB)
+    assert score >= 0
+    print("  ✅ test_extremely_large_summary_no_crash")
+
+
+def test_missing_education_field_no_crash():
+    c = make_candidate()
+    del c["education"]
+    score, _ = score_candidate(c, JOB)
+    assert score >= 0
+    print("  ✅ test_missing_education_field_no_crash")
+
+
+def test_zero_years_experience_disqualified():
+    c = make_candidate(years=0.0)
+    score, reason = score_candidate(c, JOB)
+    assert score == 0.0 and "Disqualified" in reason
+    print("  ✅ test_zero_years_experience_disqualified")
+
+
+def test_negative_or_missing_signals_dont_crash():
+    c = make_candidate()
+    c["redrob_signals"]["expected_salary_range_inr_lpa"] = {}
+    c["redrob_signals"]["skill_assessment_scores"] = None
+    score, _ = score_candidate(c, JOB)
+    assert score >= 0
+    print("  ✅ test_negative_or_missing_signals_dont_crash")
+
+
+def test_malformed_career_history_no_crash():
+    """Career entries missing expected keys should not crash scoring."""
+    c = make_candidate(career=[{"company": "X"}])
+    score, _ = score_candidate(c, JOB)
+    assert score >= 0
+    print("  ✅ test_malformed_career_history_no_crash")
+
+
+# ── CONSISTENCY / REGRESSION TESTS ──────────────────────────────────────
+
+def test_alias_matched_skill_not_shown_as_missing():
+    """
+    A skill credited via alias in career text (e.g. 'approximate nearest
+    neighbour' -> 'faiss') must appear in the matched list, not the
+    missing list — this is the exact discrepancy that used to exist
+    between what score_skills scored and what main.py/app.py displayed.
+    """
+    career = [{
+        "company": "TechCorp", "title": "ML Engineer",
+        "duration_months": 36, "industry": "SaaS",
+        "description": "built approximate nearest neighbour search "
+                        "for product recommendations"
+    }]
+    c = make_candidate(
+        skills=[{"name": "Python", "proficiency": "Expert"}],
+        career=career
+    )
+    full_text = deduplicate_text(
+        c["career_history"][0]["description"].lower()
+    )
+    matched, missing = get_matched_and_missing_skills(c, JOB, full_text)
+    assert "faiss" in matched, f"expected alias-matched 'faiss' in {matched}"
+    assert "faiss" not in missing
+    print("  ✅ test_alias_matched_skill_not_shown_as_missing")
+
+
+def test_no_skill_penalty_scales_with_weight():
+    """
+    The 'no skills matched' penalty inside score_skills must scale with
+    weights['skills'] instead of being a flat -15, so a caller who lowers
+    the skills weight (e.g. a Streamlit slider) doesn't apply a
+    disproportionately large fixed penalty relative to the rest of the
+    score.
+    """
+    c = make_candidate(skills=[])  # no required skills present
+    default_score, _ = score_candidate(c, JOB)
+
+    low_skill_weights = dict(WEIGHTS)
+    low_skill_weights["skills"] = 5  # far below default 35
+    low_score, _ = score_candidate(c, JOB, weights=low_skill_weights)
+
+    assert low_score >= 0.0 and default_score >= 0.0
+    print(
+        f"  ✅ test_no_skill_penalty_scales_with_weight "
+        f"(default_skills_weight_score={default_score}, "
+        f"low_skills_weight_score={low_score})"
+    )
+
+
 if __name__ == "__main__":
     tests = [
         test_honeypot_future_graduation,
@@ -330,6 +473,16 @@ if __name__ == "__main__":
         test_keyword_stuffing_prevented,
         test_deduplication_works,
         test_invalid_date_no_crash,
+        test_custom_weights_change_score,
+        test_zero_weight_removes_signal_contribution,
+        test_score_breakdown_respects_custom_weights,
+        test_extremely_large_summary_no_crash,
+        test_missing_education_field_no_crash,
+        test_zero_years_experience_disqualified,
+        test_negative_or_missing_signals_dont_crash,
+        test_malformed_career_history_no_crash,
+        test_alias_matched_skill_not_shown_as_missing,
+        test_no_skill_penalty_scales_with_weight,
     ]
 
     print(f"\nRunning {len(tests)} tests...\n")

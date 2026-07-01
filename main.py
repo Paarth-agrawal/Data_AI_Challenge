@@ -14,7 +14,7 @@ from config import (
 from scorer import (
     score_candidate, fix_title_caps, WEIGHTS,
     deduplicate_text, compare_candidates, get_confidence,
-    get_confidence_reasons
+    get_confidence_reasons, get_matched_and_missing_skills
 )
 
 JD_TEXT = """
@@ -28,6 +28,33 @@ python code quality product company startup cross encoder learning to rank
 xgboost neural ranking lora qlora peft bm25 hybrid retrieval
 dense sparse fusion transformer architecture
 """
+
+# Groups required skills into AI-specific capability buckets so reasoning
+# can name *what kind* of gap exists (retrieval infra vs. modeling vs.
+# frameworks) instead of a flat, generic skill list.
+SKILL_CAPABILITY_GROUPS: Dict[str, List[str]] = {
+    "vector & retrieval infrastructure": [
+        "faiss", "elasticsearch", "vector database", "information retrieval", "ranking"
+    ],
+    "modeling & deep learning": [
+        "machine learning", "deep learning", "embeddings", "sentence-transformers"
+    ],
+    "LLM & NLP tooling": [
+        "nlp", "llm", "pytorch", "tensorflow"
+    ],
+}
+
+
+def group_missing_by_capability(missing_skills: List[str]) -> List[str]:
+    """Turn a flat list of missing skill slugs into capability-group phrases,
+    e.g. ['no evidence of vector & retrieval infrastructure (FAISS, ranking)']."""
+    missing_set = set(missing_skills)
+    phrases: List[str] = []
+    for group, members in SKILL_CAPABILITY_GROUPS.items():
+        hit = [m for m in members if m in missing_set]
+        if hit:
+            phrases.append(f"{group} ({', '.join(s.title() for s in hit)})")
+    return phrases
 
 
 def build_reasoning(
@@ -89,6 +116,12 @@ def build_reasoning(
             "career history closely matches the semantic profile "
             "of a Senior AI Engineer"
         )
+    elif semantic_sim >= SEMANTIC_MEDIUM and len(matched_skills) < 3:
+        strengths.append(
+            "career text shows transferable engineering experience "
+            "that overlaps with AI/ML work, even where exact skill "
+            "tags are missing"
+        )
 
     rel_assessments = {
         k: v for k, v in assessment.items()
@@ -147,12 +180,19 @@ def build_reasoning(
 
     # Concerns
     if len(missing_skills) >= 8:
-        missing_sample = ", ".join(missing_skills[:3])
-        concerns.append(
-            f"limited evidence of production experience with "
-            f"{missing_sample} and {len(missing_skills)-3} other "
-            f"required skills"
-        )
+        capability_gaps = group_missing_by_capability(missing_skills)
+        if capability_gaps:
+            concerns.append(
+                f"capability gaps in {'; '.join(capability_gaps[:2])} — "
+                f"{len(missing_skills)} of 14 required skills unverified overall"
+            )
+        else:
+            missing_sample = ", ".join(missing_skills[:3])
+            concerns.append(
+                f"limited evidence of production experience with "
+                f"{missing_sample} and {len(missing_skills)-3} other "
+                f"required skills"
+            )
     elif len(matched_skills) == 0:
         concerns.append(
             "no direct AI/ML skill evidence found in profile "
@@ -259,9 +299,6 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
     print("Scoring candidates...")
     results:     List[Dict] = []
     disqualified = 0
-    required_skills_lower = [
-        s.lower() for s in JOB.get("required_skills", [])
-    ]
 
     for i, candidate in enumerate(all_candidates):
         score, raw_reasoning = score_candidate(
@@ -272,17 +309,18 @@ def run_ranking(candidates_path: str, output_path: str) -> None:
 
         profile  = candidate.get("profile", {})
         signals  = candidate.get("redrob_signals", {})
-        skills   = candidate.get("skills", [])
+        career   = candidate.get("career_history", [])
         title    = profile.get("current_title", "")
         years    = profile.get("years_of_experience", 0)
 
-        candidate_skills_lower = [s["name"].lower() for s in skills]
-        matched_skills = [
-            s for s in required_skills_lower if s in candidate_skills_lower
-        ]
-        missing_skills = [
-            s for s in required_skills_lower if s not in candidate_skills_lower
-        ]
+        full_text = deduplicate_text(
+            profile.get("summary", "").lower() + " " +
+            profile.get("headline", "").lower() + " " +
+            " ".join(j.get("description", "").lower() for j in career)
+        )
+        matched_skills, missing_skills = get_matched_and_missing_skills(
+            candidate, JOB, full_text
+        )
 
         if score == 0:
             disqualified += 1

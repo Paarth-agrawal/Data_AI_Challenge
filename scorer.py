@@ -96,7 +96,7 @@ def get_confidence(
     High requires matched_skills >= CONFIDENCE_SKILL_GOOD AND semantic evidence.
     """
     completeness = signals.get("profile_completeness_score", 0)
-    assessments  = signals.get("skill_assessment_scores", {})
+    assessments  = signals.get("skill_assessment_scores") or {}
     evidence     = 0
 
     if len(matched_skills) >= CONFIDENCE_SKILL_STRONG:
@@ -134,7 +134,7 @@ def get_confidence_reasons(
     """Returns human-readable reasons for the confidence level."""
     reasons: List[str] = []
     completeness = signals.get("profile_completeness_score", 0)
-    assessments  = signals.get("skill_assessment_scores", {})
+    assessments  = signals.get("skill_assessment_scores") or {}
 
     if len(matched_skills) >= CONFIDENCE_SKILL_GOOD:
         reasons.append(f"✓ {len(matched_skills)} required skills matched")
@@ -225,20 +225,24 @@ def detect_honeypot(candidate: Dict[str, Any]) -> Tuple[bool, str]:
     return False, ""
 
 
-def score_skills(
+def get_matched_and_missing_skills(
     candidate: Dict[str, Any],
     job: Dict[str, Any],
     full_text: str,
-    jd_vector: Any = None,
-    vectorizer: Any = None,
-) -> Tuple[float, List[str], List[str], List[str], float]:
-    """Returns (score, reasons, matched, missing, semantic_sim)"""
+) -> Tuple[List[str], List[str]]:
+    """
+    Single source of truth for which required skills a candidate is
+    credited for — exact name match OR alias match found in their
+    career/summary text. `score_skills` uses this internally, and
+    `main.py` / `app.py` call it too, so the matched/missing lists shown
+    in reasoning strings and the UI always agree with what was actually
+    scored (previously main.py/app.py recomputed this with exact-match
+    only, so alias-credited skills like "dense retrieval" → "rag" showed
+    up as "missing" in the reasoning even though they were scored).
+    """
     skills           = candidate.get("skills", [])
-    signals          = candidate.get("redrob_signals", {})
     candidate_skills = [s["name"].lower() for s in skills]
     required_skills  = [s.lower() for s in job.get("required_skills", [])]
-    score            = 0.0
-    reasons:  List[str] = []
 
     matched: List[str] = [s for s in required_skills if s in candidate_skills]
     alias_matched: List[str] = []
@@ -250,17 +254,48 @@ def score_skills(
 
     all_matched = matched + alias_matched
     missing     = [s for s in required_skills if s not in all_matched]
+    return all_matched, missing
 
-    skill_score = (len(all_matched) / len(required_skills)) * WEIGHTS["skills"]
+
+def score_skills(
+    candidate: Dict[str, Any],
+    job: Dict[str, Any],
+    full_text: str,
+    jd_vector: Any = None,
+    vectorizer: Any = None,
+    weights: Dict[str, float] = None,
+) -> Tuple[float, List[str], List[str], List[str], float]:
+    """Returns (score, reasons, matched, missing, semantic_sim).
+
+    `weights` lets callers (e.g. the Streamlit UI) override the default
+    point allocation per skill-related signal without touching config.py.
+    """
+    weights          = weights or WEIGHTS
+    skills           = candidate.get("skills", [])
+    signals          = candidate.get("redrob_signals", {})
+    candidate_skills = [s["name"].lower() for s in skills]
+    required_skills  = [s.lower() for s in job.get("required_skills", [])]
+    score            = 0.0
+    reasons:  List[str] = []
+
+    all_matched, missing = get_matched_and_missing_skills(candidate, job, full_text)
+    alias_matched = [s for s in all_matched if s not in candidate_skills]
+
+    skill_score = (len(all_matched) / len(required_skills)) * weights["skills"]
     score      += skill_score
 
+    # No-match / one-match penalties scale with weights["skills"] so a
+    # caller who lowers the skills weight (e.g. Streamlit sliders) doesn't
+    # get a disproportionately large flat penalty relative to the rest of
+    # the score. Ratios (15/35, 5/35) match the original default-weight
+    # behaviour exactly when weights["skills"] == 35.
     if len(all_matched) == 0:
-        score -= 15
+        score -= weights["skills"] * (15.0 / 35.0)
         reasons.append(
             "no direct skill match found in profile or career history"
         )
     elif len(all_matched) == 1:
-        score -= 5
+        score -= weights["skills"] * (5.0 / 35.0)
         reasons.append(
             f"limited skill coverage — only {all_matched[0]} verified"
         )
@@ -285,14 +320,14 @@ def score_skills(
 
     bonus_skills  = [s.lower() for s in job.get("bonus_skills", [])]
     bonus_matched = [s for s in bonus_skills if s in candidate_skills]
-    bonus_score   = min(WEIGHTS["bonus"], len(bonus_matched) * 1.5)
+    bonus_score   = min(weights["bonus"], len(bonus_matched) * 1.5)
     score        += bonus_score
     if bonus_matched:
         reasons.append(
             f"additional depth in {', '.join(bonus_matched[:3])}"
         )
 
-    assessment_scores = signals.get("skill_assessment_scores", {})
+    assessment_scores = signals.get("skill_assessment_scores") or {}
     assessment_map    = [s.lower() for s in job.get("assessment_skill_map", [])]
     relevant_scores   = [
         v for k, v in assessment_scores.items()
@@ -300,7 +335,7 @@ def score_skills(
     ]
     if relevant_scores:
         avg_assessment   = sum(relevant_scores) / len(relevant_scores)
-        assessment_bonus = (avg_assessment / 100) * WEIGHTS["assessment"]
+        assessment_bonus = (avg_assessment / 100) * weights["assessment"]
         score           += assessment_bonus
         reasons.append(
             f"verified platform assessments average {round(avg_assessment,1)}/100"
@@ -315,7 +350,7 @@ def score_skills(
             semantic_sim     = float(
                 cosine_similarity(jd_vector, candidate_vector)[0][0]
             )
-            semantic_score = semantic_sim * WEIGHTS["semantic"]
+            semantic_score = semantic_sim * weights["semantic"]
             score         += semantic_score
             if semantic_sim >= SEMANTIC_HIGH:
                 reasons.append(
@@ -337,7 +372,7 @@ def score_skills(
             "machine learning", "deep learning", "llm"
         ]
         hits       = sum(1 for kw in ai_keywords if kw in full_text)
-        score     += min(5, hits * 0.5)
+        score     += min(weights["semantic"] / 2, hits * 0.5)
         semantic_sim = hits / len(ai_keywords)
         if hits >= 4:
             reasons.append(
@@ -355,31 +390,34 @@ def score_skills(
 def score_experience(
     years: float,
     job: Dict[str, Any],
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, List[str]]:
+    weights = weights or WEIGHTS
+    max_w   = weights["experience"]
     min_exp = job.get("min_experience_years", MIN_EXPERIENCE_YEARS)
     max_exp = job.get("max_experience_years", MAX_EXPERIENCE_YEARS)
     reasons: List[str] = []
 
     if min_exp <= years <= max_exp:
-        exp_score = float(WEIGHTS["experience"])
+        exp_score = float(max_w)
         reasons.append(
             f"{years} years of experience squarely within "
             f"the {min_exp}–{max_exp} year sweet spot"
         )
     elif years > 12:
-        exp_score = 5.0
+        exp_score = max_w * (5.0 / 15.0)
         reasons.append(
             f"{years} years of experience — may be overqualified "
             f"for this role level"
         )
     elif years > max_exp:
-        exp_score = 10.0
+        exp_score = max_w * (10.0 / 15.0)
         reasons.append(f"{years} years of experience (slightly above ideal range)")
     elif years >= min_exp - 1:
-        exp_score = 8.0
+        exp_score = max_w * (8.0 / 15.0)
         reasons.append(f"{years} years of experience (slightly below ideal range)")
     else:
-        exp_score = 3.0
+        exp_score = max_w * (3.0 / 15.0)
         reasons.append(f"{years} years of experience (below required minimum)")
 
     return exp_score, reasons
@@ -388,13 +426,16 @@ def score_experience(
 def score_title(
     current_title: str,
     job: Dict[str, Any],
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, List[str]]:
     """
-    Tiered title scoring.
-    Tier 1 (15 pts): Core AI/ML roles — strongest alignment.
-    Tier 2 (12 pts): Related data/science roles — good alignment.
-    Tier 3 (7 pts):  Generic tech roles — adjacent alignment.
+    Tiered title scoring, scaled against weights["title"] (default 15 pts).
+    Tier 1: Core AI/ML roles — strongest alignment (100% of weight).
+    Tier 2: Related data/science roles — good alignment (~80% of weight).
+    Tier 3: Generic tech roles — adjacent alignment (~47% of weight).
     """
+    weights = weights or WEIGHTS
+    max_w   = weights["title"]
     reasons: List[str] = []
     tiered = job.get("tiered_titles", {})
 
@@ -404,7 +445,7 @@ def score_title(
                 f"current role as {fix_title_caps(current_title)} "
                 f"directly matches the target function"
             )
-            return 15.0, reasons
+            return float(max_w), reasons
 
     for title in tiered.get("tier_2", []):
         if title.lower() in current_title:
@@ -412,7 +453,7 @@ def score_title(
                 f"current role as {fix_title_caps(current_title)} "
                 f"is closely adjacent to the target function"
             )
-            return 12.0, reasons
+            return max_w * (12.0 / 15.0), reasons
 
     for title in tiered.get("tier_3", []):
         if title.lower() in current_title:
@@ -420,7 +461,7 @@ def score_title(
                 f"current role as {fix_title_caps(current_title)} "
                 f"is a technical role but not AI-specific"
             )
-            return 7.0, reasons
+            return max_w * (7.0 / 15.0), reasons
 
     reasons.append(
         f"current role as {fix_title_caps(current_title)} "
@@ -435,7 +476,9 @@ def score_career(
     education: List[Dict],
     full_text: str,
     consulting_ratio: float,
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, List[str]]:
+    weights = weights or WEIGHTS
     reasons: List[str] = []
     score = 0.0
 
@@ -454,13 +497,13 @@ def score_career(
             product_roles += 1
 
     if product_roles >= 3:
-        score += WEIGHTS["career"]
+        score += weights["career"]
         reasons.append(
             "career demonstrates sustained product-company engineering "
             "experience relevant to a startup AI role"
         )
     elif product_roles >= 1:
-        score += 5
+        score += weights["career"] * 0.5
         reasons.append(
             "career includes some product-company engineering experience"
         )
@@ -473,7 +516,7 @@ def score_career(
     if education and isinstance(education, list):
         tiers = [edu.get("tier", "") for edu in education]
         if "tier_1" in tiers:
-            score += WEIGHTS["education"]
+            score += weights["education"]
             inst = next(
                 (edu.get("institution", "") for edu in education
                  if edu.get("tier") == "tier_1"), ""
@@ -486,7 +529,9 @@ def score_career(
 def score_location(
     country: str,
     location: str,
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, List[str]]:
+    weights = weights or WEIGHTS
     preferred_cities = [
         "pune", "noida", "delhi", "hyderabad", "mumbai",
         "bangalore", "bengaluru", "chennai", "gurugram", "gurgaon"
@@ -494,7 +539,7 @@ def score_location(
     if country == "india" or any(
         city in location for city in preferred_cities
     ):
-        return float(WEIGHTS["location"]), [
+        return float(weights["location"]), [
             "location aligns with the hiring preference for Pune/Noida area"
         ]
     return 0.0, []
@@ -503,7 +548,9 @@ def score_location(
 def score_signals(
     signals: Dict[str, Any],
     job: Dict[str, Any],
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, List[str]]:
+    weights = weights or WEIGHTS
     signal_score = 0.0
     reasons: List[str] = []
 
@@ -617,7 +664,7 @@ def score_signals(
             f"notice period of {notice} days may delay onboarding"
         )
 
-    salary_range = signals.get("expected_salary_range_inr_lpa", {})
+    salary_range = signals.get("expected_salary_range_inr_lpa") or {}
     salary_max   = salary_range.get("max", 0)
     budget_max   = job.get("salary_budget_max_lpa", SALARY_BUDGET_MAX_LPA)
     if salary_max > 0:
@@ -690,7 +737,12 @@ def score_signals(
     if signals.get("linkedin_connected", False):
         signal_score += 0.5
 
-    return max(SIGNAL_MIN_SCORE, min(SIGNAL_MAX_SCORE, signal_score)), reasons
+    capped = max(SIGNAL_MIN_SCORE, min(SIGNAL_MAX_SCORE, signal_score))
+    # Rescale the raw evidence score (capped at config's SIGNAL_MAX_SCORE)
+    # onto whatever max weight the caller (e.g. the Streamlit sliders)
+    # assigns to "signals", so adjusting the slider actually changes ranks.
+    scaled = capped * (weights["signals"] / SIGNAL_MAX_SCORE)
+    return scaled, reasons
 
 
 def get_score_breakdown(
@@ -698,8 +750,10 @@ def get_score_breakdown(
     job: Dict[str, Any],
     jd_vector: Any = None,
     vectorizer: Any = None,
+    weights: Dict[str, float] = None,
 ) -> Dict[str, float]:
     """Single source of truth for score breakdown. Used by main.py and app.py."""
+    weights          = weights or WEIGHTS
     profile          = candidate.get("profile", {})
     signals          = candidate.get("redrob_signals", {})
     career           = candidate.get("career_history", [])
@@ -717,10 +771,10 @@ def get_score_breakdown(
     )
 
     s_score, _, _, _, _ = score_skills(
-        candidate, job, full_text, jd_vector, vectorizer
+        candidate, job, full_text, jd_vector, vectorizer, weights
     )
-    e_score, _  = score_experience(years_experience, job)
-    t_score, _  = score_title(current_title, job)
+    e_score, _  = score_experience(years_experience, job, weights)
+    t_score, _  = score_title(current_title, job, weights)
 
     all_companies   = [j.get("company", "").lower() for j in career]
     consulting_jobs = sum(
@@ -731,10 +785,10 @@ def get_score_breakdown(
     consulting_ratio = consulting_jobs / total_jobs
 
     c_score, _   = score_career(
-        career, consulting_firms, education, full_text, consulting_ratio
+        career, consulting_firms, education, full_text, consulting_ratio, weights
     )
-    l_score, _   = score_location(country, location)
-    sig_score, _ = score_signals(signals, job)
+    l_score, _   = score_location(country, location, weights)
+    sig_score, _ = score_signals(signals, job, weights)
 
     return {
         "Skills":     round(s_score, 1),
@@ -754,10 +808,11 @@ def compare_candidates(
     score_b: float,
     jd_vector: Any = None,
     vectorizer: Any = None,
+    weights: Dict[str, float] = None,
 ) -> str:
     """Explains why candidate A outranked candidate B."""
-    bd_a = get_score_breakdown(a, job, jd_vector, vectorizer)
-    bd_b = get_score_breakdown(b, job, jd_vector, vectorizer)
+    bd_a = get_score_breakdown(a, job, jd_vector, vectorizer, weights)
+    bd_b = get_score_breakdown(b, job, jd_vector, vectorizer, weights)
 
     advantages:     List[str] = []
     disadvantages:  List[str] = []
@@ -789,8 +844,16 @@ def score_candidate(
     job: Dict[str, Any],
     jd_tfidf_vector: Any = None,
     tfidf_vectorizer: Any = None,
+    weights: Dict[str, float] = None,
 ) -> Tuple[float, str]:
-    """Main scoring function. Returns (raw_score, reason_string)."""
+    """Main scoring function. Returns (raw_score, reason_string).
+
+    `weights` defaults to the global WEIGHTS from config.py but can be
+    overridden by callers (e.g. the Streamlit sidebar sliders) so that
+    custom weight configurations actually change candidate ranking,
+    not just the UI display.
+    """
+    weights: Dict[str, float] = weights or WEIGHTS
     score:   float      = 0.0
     reasons: List[str]  = []
 
@@ -862,30 +925,30 @@ def score_candidate(
         reasons.append("career is predominantly consulting-firm based")
 
     s_score, s_reasons, matched, missing, _ = score_skills(
-        candidate, job, full_text, jd_tfidf_vector, tfidf_vectorizer
+        candidate, job, full_text, jd_tfidf_vector, tfidf_vectorizer, weights
     )
     score += s_score
     reasons.extend(s_reasons)
 
-    e_score, e_reasons = score_experience(years_experience, job)
+    e_score, e_reasons = score_experience(years_experience, job, weights)
     score += e_score
     reasons.extend(e_reasons)
 
-    t_score, t_reasons = score_title(current_title, job)
+    t_score, t_reasons = score_title(current_title, job, weights)
     score += t_score
     reasons.extend(t_reasons)
 
     c_score, c_reasons = score_career(
-        career, consulting_firms, education, full_text, consulting_ratio
+        career, consulting_firms, education, full_text, consulting_ratio, weights
     )
     score += c_score
     reasons.extend(c_reasons)
 
-    l_score, l_reasons = score_location(country, location)
+    l_score, l_reasons = score_location(country, location, weights)
     score += l_score
     reasons.extend(l_reasons)
 
-    sig_score, sig_reasons = score_signals(signals, job)
+    sig_score, sig_reasons = score_signals(signals, job, weights)
     score += sig_score
     reasons.extend(sig_reasons)
 

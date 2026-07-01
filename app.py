@@ -5,13 +5,17 @@ import io
 from typing import Dict, List
 import plotly.graph_objects as go
 import plotly.express as px
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from scorer import (
     score_candidate, get_score_breakdown, compare_candidates,
     WEIGHTS, fix_title_caps, deduplicate_text,
-    get_confidence, get_confidence_reasons
+    get_confidence, get_confidence_reasons,
+    get_matched_and_missing_skills
 )
+from main import JD_TEXT, build_reasoning
 from job_description import JOB
-from config import TOP_N_CANDIDATES
+from config import TOP_N_CANDIDATES, TFIDF_MAX_FEATURES, TFIDF_NGRAM_MIN, TFIDF_NGRAM_MAX
 
 st.set_page_config(
     page_title="AI Candidate Ranker",
@@ -50,7 +54,12 @@ with st.sidebar:
     st.metric("Total Weight", total_weight, delta=total_weight - sum(WEIGHTS.values()))
 
     if total_weight != sum(WEIGHTS.values()):
-        st.warning("Weights modified from defaults")
+        st.warning(
+            "Weights modified from defaults — rankings below will be "
+            "recomputed using these custom weights."
+        )
+
+    st.session_state["weights"] = custom_weights
 
     st.markdown("---")
     st.markdown("### Why Not LLM APIs?")
@@ -104,35 +113,75 @@ with tab1:
 
             if run:
                 results: List[Dict] = []
-                req_skills = [s.lower() for s in JOB.get("required_skills", [])]
 
-                # Use custom weights from sidebar
-                custom_job = {**JOB}
+                # Build the same TF-IDF model main.py builds over the full
+                # 100K-candidate pipeline, but scoped to this uploaded batch,
+                # so the live demo actually exercises semantic similarity
+                # instead of silently falling back to the keyword-hit path.
+                progress = st.progress(0, text="Building TF-IDF semantic model...")
+                candidate_texts = []
+                for candidate in candidates:
+                    profile = candidate.get("profile", {})
+                    career  = candidate.get("career_history", [])
+                    raw = (
+                        profile.get("summary", "").lower() + " " +
+                        profile.get("headline", "").lower() + " " +
+                        " ".join(s["name"].lower() for s in candidate.get("skills", [])) + " " +
+                        " ".join(j.get("description", "").lower() for j in career)
+                    )
+                    candidate_texts.append(deduplicate_text(raw))
 
-                progress = st.progress(0, text="Scoring candidates...")
+                vectorizer = TfidfVectorizer(
+                    max_features=TFIDF_MAX_FEATURES,
+                    ngram_range=(TFIDF_NGRAM_MIN, TFIDF_NGRAM_MAX)
+                )
+                all_texts    = [deduplicate_text(JD_TEXT)] + candidate_texts
+                tfidf_matrix = vectorizer.fit_transform(all_texts)
+                jd_vector    = tfidf_matrix[0]
+                cand_vectors = tfidf_matrix[1:]
+                semantic_scores = cosine_similarity(jd_vector, cand_vectors)[0]
+                st.session_state["jd_vector"]  = jd_vector
+                st.session_state["vectorizer"] = vectorizer
+
+                progress.progress(0, text="Scoring candidates...")
                 for idx, candidate in enumerate(candidates):
-                    score, reasoning = score_candidate(candidate, JOB)
+                    score, _raw_reasoning = score_candidate(
+                        candidate, JOB, weights=custom_weights,
+                        jd_tfidf_vector=jd_vector, tfidf_vectorizer=vectorizer
+                    )
                     profile   = candidate.get("profile", {})
                     signals   = candidate.get("redrob_signals", {})
-                    skills    = candidate.get("skills", [])
                     education = candidate.get("education", [])
                     career    = candidate.get("career_history", [])
                     title     = profile.get("current_title", "")
                     years     = profile.get("years_of_experience", 0)
 
-                    cand_skills = [s["name"].lower() for s in skills]
-                    matched = [s for s in req_skills if s in cand_skills]
-                    missing = [s for s in req_skills if s not in cand_skills]
-
                     full_text = deduplicate_text(
                         profile.get("summary", "").lower() + " " +
+                        profile.get("headline", "").lower() + " " +
                         " ".join(j.get("description", "").lower() for j in career)
                     )
+                    # Alias-aware — matches exactly what score_candidate scored,
+                    # so a skill credited via alias (e.g. "dense retrieval" -> "rag")
+                    # shows as matched here too, not as "missing".
+                    matched, missing = get_matched_and_missing_skills(
+                        candidate, JOB, full_text
+                    )
 
-                    breakdown = get_score_breakdown(candidate, JOB)
-                    sem_sim   = 0.0
+                    breakdown = get_score_breakdown(
+                        candidate, JOB, weights=custom_weights,
+                        jd_vector=jd_vector, vectorizer=vectorizer
+                    )
+                    sem_sim = float(semantic_scores[idx])
                     confidence = get_confidence(matched, sem_sim, signals)
                     conf_reasons = get_confidence_reasons(matched, sem_sim, signals)
+                    # Same polished strengths/concerns reasoning main.py writes
+                    # to submission.csv, so the demo and the actual submission
+                    # never disagree on why a candidate ranked where they did.
+                    reasoning = build_reasoning(
+                        candidate, title, years, matched, missing,
+                        signals, score, sem_sim
+                    )
 
                     results.append({
                         "candidate_id":  candidate["candidate_id"],
@@ -182,7 +231,7 @@ with tab1:
                     sp1.markdown(f"**{top['name']}**  \n{fix_title_caps(top['title'])}")
                     sp2.metric("Score", f"{top['score']:.2f}")
                     sp3.metric("Confidence", top["confidence"])
-                    sp4.metric("Skills", f"{len(top['matched'])}/14")
+                    sp4.metric("Skills", f"{len(top['matched'])}/{len(JOB.get('required_skills', []))}")
                     sp5.metric("Notice", f"{top['notice']}d")
 
                     st.markdown(f"**Why #1:** {top['reasoning']}")
@@ -190,20 +239,27 @@ with tab1:
                     # Score breakdown with progress bars
                     st.markdown("**Score Breakdown:**")
                     max_pts = {
-                        "Skills": 50, "Experience": 15, "Title": 15,
-                        "Career": 10, "Location": 2, "Signals": 20
+                        "Skills": (custom_weights["skills"] + custom_weights["assessment"]
+                                   + custom_weights["bonus"] + custom_weights["semantic"]),
+                        "Experience": custom_weights["experience"],
+                        "Title":      custom_weights["title"],
+                        "Career":     custom_weights["career"] + custom_weights["education"],
+                        "Location":   custom_weights["location"],
+                        "Signals":    custom_weights["signals"],
                     }
                     bd_cols = st.columns(len(top["breakdown"]))
                     for j, (key, val) in enumerate(top["breakdown"].items()):
-                        mx = max_pts.get(key, 20)
-                        bd_cols[j].metric(key, f"{val}/{mx}")
+                        mx = max_pts.get(key, 20) or 1
+                        bd_cols[j].metric(key, f"{val}/{max_pts.get(key, 20)}")
                         bd_cols[j].progress(min(1.0, max(0.0, val / mx)))
 
                     if len(qualified) >= 2:
                         second = qualified[1]
                         comp = compare_candidates(
                             top["_candidate"], second["_candidate"],
-                            JOB, top["score"], second["score"]
+                            JOB, top["score"], second["score"],
+                            jd_vector=jd_vector, vectorizer=vectorizer,
+                            weights=custom_weights
                         )
                         st.info(f"**vs #{2} {second['name']}:** {comp}")
 
@@ -216,7 +272,10 @@ with tab1:
                         ["All", "High", "Medium", "Low"]
                     )
                 with fc2:
-                    min_skills = st.slider("Minimum skills matched", 0, 14, 0)
+                    min_skills = st.slider(
+                        "Minimum skills matched",
+                        0, len(JOB.get("required_skills", [])), 0
+                    )
 
                 filtered = [
                     r for r in qualified
@@ -252,13 +311,18 @@ with tab1:
 
                         # Score breakdown
                         max_pts = {
-                            "Skills": 50, "Experience": 15, "Title": 15,
-                            "Career": 10, "Location": 2, "Signals": 20
+                            "Skills": (custom_weights["skills"] + custom_weights["assessment"]
+                                       + custom_weights["bonus"] + custom_weights["semantic"]),
+                            "Experience": custom_weights["experience"],
+                            "Title":      custom_weights["title"],
+                            "Career":     custom_weights["career"] + custom_weights["education"],
+                            "Location":   custom_weights["location"],
+                            "Signals":    custom_weights["signals"],
                         }
                         bd_c = st.columns(len(r["breakdown"]))
                         for j, (key, val) in enumerate(r["breakdown"].items()):
-                            mx = max_pts.get(key, 20)
-                            bd_c[j].metric(key, f"{val}/{mx}")
+                            mx = max_pts.get(key, 20) or 1
+                            bd_c[j].metric(key, f"{val}/{max_pts.get(key, 20)}")
                             bd_c[j].progress(min(1.0, max(0.0, val / mx)))
 
                         st.markdown(f"**Reasoning:** {r['reasoning']}")
@@ -311,18 +375,28 @@ with tab2:
         if a_idx != b_idx:
             a = qualified[a_idx]
             b = qualified[b_idx]
+            cmp_weights = st.session_state.get("weights", WEIGHTS)
+            cmp_jd_vector  = st.session_state.get("jd_vector")
+            cmp_vectorizer = st.session_state.get("vectorizer")
 
             comp = compare_candidates(
                 a["_candidate"], b["_candidate"],
-                JOB, a["score"], b["score"]
+                JOB, a["score"], b["score"],
+                jd_vector=cmp_jd_vector, vectorizer=cmp_vectorizer,
+                weights=cmp_weights
             )
             st.info(f"**Result:** {comp}")
 
             # Side by side
             st.markdown("#### Score Breakdown")
             max_pts = {
-                "Skills": 50, "Experience": 15, "Title": 15,
-                "Career": 10, "Location": 2, "Signals": 20
+                "Skills": (cmp_weights["skills"] + cmp_weights["assessment"]
+                           + cmp_weights["bonus"] + cmp_weights["semantic"]),
+                "Experience": cmp_weights["experience"],
+                "Title":      cmp_weights["title"],
+                "Career":     cmp_weights["career"] + cmp_weights["education"],
+                "Location":   cmp_weights["location"],
+                "Signals":    cmp_weights["signals"],
             }
 
             categories = list(a["breakdown"].keys())

@@ -47,8 +47,11 @@ JOB = {
     ],
 
     "consulting_firms": [
-        "tcs", "infosys", "wipro", "accenture",
-        "cognizant", "capgemini"
+        "tcs", "tata consultancy", "infosys", "wipro", "accenture",
+        "cognizant", "capgemini", "hcl", "hcltech", "tech mahindra",
+        "ltimindtree", "l&t infotech", "lti", "mindtree", "ibm",
+        "deloitte", "genpact", "mphasis", "hexaware", "birlasoft",
+        "persistent systems", "zensar", "sonata software"
     ],
 
     "min_experience_years": 5,

@@ -118,6 +118,34 @@ Weights reflect how a senior technical recruiter prioritises evidence:
 | Education = 1 point only | Prevents institutional prestige bias | Underweights some quality signals |
 | No LLM APIs | Reproducible, deterministic, offline | Less flexible reasoning |
 | Behavioral cap at 20pts | Prevents popularity from rescuing weak profiles | May underreward highly engaged candidates |
+| Single `WEIGHTS` source of truth | `config.py` defines weights once; `scorer.py` accepts an optional `weights` override that every scoring function threads through, so the Streamlit sliders in `app.py` change real rankings, not just labels | Slightly more parameter-passing through the call chain |
+
+### Why TF-IDF (and not embeddings)
+We need to score 100,000 candidates in minutes, on CPU, with no external
+API calls, and the same input must always produce the same output for
+judging. Sentence-Transformer embeddings would mean a model download,
+GPU-friendly batching to stay fast, and a non-trivial dependency surface.
+TF-IDF with bigrams gives "good enough" lexical/semantic overlap
+(e.g. catching "dense retrieval" when "FAISS" isn't listed) while keeping
+the pipeline self-contained, fast, and fully reproducible.
+
+### Why education is low-weight
+Tier-1 institution background is a *correlated*, not *causal*, signal for
+engineering ability, and weighting it heavily would bias the ranking
+toward candidates with privileged access to elite institutions. We treat
+it strictly as a tiebreaker (1 point) — it can never lift a weak profile
+above a strong one, only nudge between two otherwise-similar candidates.
+
+### How we ensure fairness
+- Gender, name, age, and photo are never read or used in scoring.
+- Location is a bonus only (+2 max) — never a penalty for being elsewhere.
+- Consulting-firm background is only penalized when *combined* with weak
+  AI/ML evidence, so a strong AI engineer at TCS is not auto-penalized.
+- Behavioral signals are hard-capped at 20 points so platform popularity
+  can never outrank verified technical evidence.
+- All thresholds and weights live in `config.py` as named constants —
+  nothing is a "magic number" buried in scoring logic, so any reviewer
+  can audit exactly how a number was chosen.
 
 ## Sample Candidate Flow
 
@@ -194,6 +222,36 @@ Conservative thresholds prevent false positives on genuine senior engineers.
 22. verified_phone
 23. linkedin_connected
 
+## Changelog — Consistency Fixes
+
+A self-review pass caught three places where displayed information could
+disagree with what was actually scored. All are fixed and covered by
+new tests:
+
+- **Alias-matched skills now show as matched, not missing.** Previously
+  `main.py`'s reasoning and `app.py`'s UI recomputed matched/missing
+  skills with exact-name matching only, while the actual score credited
+  alias matches too (e.g. "approximate nearest neighbour" → FAISS).
+  A candidate could be scored as having a skill but shown as missing it.
+  Fixed by adding `get_matched_and_missing_skills()` in `scorer.py` as a
+  single source of truth, used by `score_skills`, `main.py`, and `app.py`
+  alike. Covered by `test_alias_matched_skill_not_shown_as_missing`.
+- **The Streamlit demo now uses real TF-IDF semantic matching.**
+  `app.py` previously called `score_candidate()` without a TF-IDF vector,
+  which silently fell back to a cruder keyword-hit heuristic — the
+  interactive demo never actually exercised the semantic matching
+  described in this README. `app.py` now builds a TF-IDF model over the
+  uploaded batch (same approach as `main.py`) and threads it through
+  scoring, confidence, and comparison calls.
+- **The "no skills matched" penalty now scales with `weights["skills"]`**
+  instead of being a flat `-15`, matching how every other scoring branch
+  in `scorer.py` already respects weight overrides. Covered by
+  `test_no_skill_penalty_scales_with_weight`.
+- **`consulting_firms` list widened** from 6 to 22 entries (added HCL,
+  Tech Mahindra, LTIMindtree, IBM, Deloitte, Genpact, and others) so the
+  consulting-penalty logic isn't blind to major firms outside the
+  original short list.
+
 ## Limitations
 
 - TF-IDF is lexical similarity, not true semantic understanding
@@ -233,8 +291,8 @@ config.py                — All thresholds and weights (single source of truth)
 main.py                  — Pipeline: load, score, rank, normalize, output
 scorer.py                — All scoring functions + honeypot detection
 job_description.py       — Role specification
-app.py                   — Streamlit interactive demo
-test_scoring.py          — 26 unit tests covering all scoring functions
+app.py                   — Streamlit interactive demo (weight sliders live-affect ranking)
+test_scoring.py          — 36 unit tests: scoring, honeypot, edge cases, weight-override parity, alias/skill consistency
 requirements.txt         — Pinned dependencies
 submission.csv           — Generated output (top 100 candidates)
 submission_metadata.yaml — Submission details
