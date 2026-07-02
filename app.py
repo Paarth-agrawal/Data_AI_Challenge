@@ -304,10 +304,15 @@ with tab1:
                         if r["missing"]:
                             st.markdown(f"**Missing:** `{', '.join(r['missing'][:4])}`")
 
-                        # Confidence detail
-                        with st.expander(f"Confidence: {r['confidence']} — why?"):
-                            for cr in r["conf_reasons"]:
-                                st.markdown(f"- {cr}")
+                        # Confidence detail — NOT an expander: Streamlit only
+                        # allows nested expanders from v1.46.0+, and this repo
+                        # pins streamlit==1.40.2, so nesting one inside the
+                        # candidate expander above throws StreamlitAPIException.
+                        # A bold label + always-visible list is simpler and
+                        # works on every Streamlit version.
+                        st.markdown(f"**Confidence: {r['confidence']} — why?**")
+                        for cr in r["conf_reasons"]:
+                            st.markdown(f"- {cr}")
 
                         # Score breakdown
                         max_pts = {
@@ -334,13 +339,26 @@ with tab1:
                         for r in disqualified:
                             st.markdown(f"- **{r['name']}** ({r['title']}) — {r['reasoning']}")
 
-                # Download
+                # Download — normalized 0-1 exactly like main.py's official
+                # submission.csv, so this demo export always matches the
+                # format the real pipeline produces (previously wrote raw
+                # unnormalized scores, which would not match main.py's output
+                # if someone submitted this file directly).
                 st.markdown("---")
+                top_n = qualified[:TOP_N_CANDIDATES]
+                if top_n:
+                    max_s = top_n[0]["score"]
+                    min_s = top_n[-1]["score"]
+                    s_range = max_s - min_s if max_s != min_s else 1
+                else:
+                    max_s = min_s = s_range = 1
+
                 buf = io.StringIO()
                 writer = csv.writer(buf)
                 writer.writerow(["candidate_id", "rank", "score", "reasoning"])
-                for rank, r in enumerate(qualified[:TOP_N_CANDIDATES], 1):
-                    writer.writerow([r["candidate_id"], rank, r["score"], r["reasoning"]])
+                for rank, r in enumerate(top_n, 1):
+                    norm_score = round((r["score"] - min_s) / s_range, 4)
+                    writer.writerow([r["candidate_id"], rank, norm_score, r["reasoning"]])
                 st.download_button(
                     "📥 Download submission.csv",
                     data=buf.getvalue(),
